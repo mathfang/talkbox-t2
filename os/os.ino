@@ -1,6 +1,13 @@
 #include "AudioTools.h"
 #include "WiFi.h"
 #include "WiFiUdp.h"
+#include <FastLED.h>
+
+#define NUM_LEDS    13 //1
+#define LED_PIN     23
+#define LED_TYPE    WS2812B
+
+CRGB leds[NUM_LEDS];
 
 //
 // HOLY FRICK JUST USE THIS NETCAT COMMAND (with the -p) IT WORKS
@@ -53,6 +60,13 @@ void connectToWiFi() {
 
     Serial.println("WiFi connected at IP:");
     Serial.println(WiFi.localIP());
+}
+
+void setupLeds() {
+    FastLED.setMaxPowerInVoltsAndMilliamps(5, 400);
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.setBrightness(80);
+    FastLED.setDither(1);
 }
 
 void setupMic() {
@@ -116,6 +130,8 @@ void readSpeaker(void* pvParameters) {
             udp_in.read(rx_buffer, 512);
             rx_bytes += packet_size;
             volume.write(rx_buffer, packet_size);
+            Serial.print("incoming audio packet size:");
+            Serial.println(packet_size);
         } else {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
@@ -147,7 +163,7 @@ void streamPot(void* pvParameters) {
 
         volume.setVolume(potNorm);
 
-        vTaskDelay(pdMS_TO_TICKS(POT_PERIOD_MS));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -164,25 +180,46 @@ void readPot(void* pvParameters) {
 
             Serial.print("remote pot value: ");
             Serial.println(result);
+
+            for (int i = 4; i < NUM_LEDS; i++) {
+                leds[i] = CHSV(0, 0, result * 51);
+            }
+
+            // FastLED.show();
+
         } else {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 }
+
+// void manageLeds(void* pvParameters) {
+//     for (;;) {
+//         FastLED.setBrightness(remotePot);
+
+//         for (int i = 0; i < NUM_LEDS; i++) {
+//             leds[i] = CRGB::White;
+//         }
+
+//         vTaskDelay(pdMS_TO_TICKS(1));
+//     }
+// }
 
 void setup() {
     Serial.begin(115200);
 
     connectToWiFi();
+    setupLeds();
     setupMic();
     setupSpeaker();
 
     xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
 
+    // xTaskCreatePinnedToCore(manageLeds, "Light LEDs based on Volume", 8000, NULL, 0, NULL, 2);
     xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);
-    xTaskCreatePinnedToCore(readPot, "Read Remote Pot to Serial", 8000, NULL, 0, NULL, 0);
-    xTaskCreatePinnedToCore(manageWiFi,  "WiFi Diagnostics",               8000, NULL, 0, NULL, 1);
+    xTaskCreatePinnedToCore(readPot, "Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
+    // xTaskCreatePinnedToCore(manageWiFi,  "WiFi Diagnostics",               8000, NULL, 0, NULL, 0);
 
     // xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote", 4096, NULL, 0, NULL, 0);
 }
