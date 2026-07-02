@@ -162,10 +162,10 @@ void streamPot(void* pvParameters) {
         pot_udp_out.write(potNorm_bytes, 4);
         pot_udp_out.endPacket();
 
-        Serial.print("streaming pot value: ");
-        Serial.println(potNorm);
+        // Serial.print("streaming pot value: ");
+        // Serial.println(potNorm);
 
-        volume.setVolume(potNorm);
+        volume.setVolume(potNorm * 5);
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -182,8 +182,8 @@ void readPot(void* pvParameters) {
             float result;
             memcpy(&result, remote_potNorm, 4);
 
-            Serial.print("reading pot value: ");
-            Serial.println(result);
+            // Serial.print("reading pot value: ");
+            // Serial.println(result);
 
             for (int i = 0; i < NUM_LEDS; i++) {
                 leds[i] = CHSV(24, 200, result * 255);
