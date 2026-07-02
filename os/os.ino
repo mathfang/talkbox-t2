@@ -165,7 +165,7 @@ void streamPot(void* pvParameters) {
         Serial.print("streaming pot value: ");
         Serial.println(potNorm);
 
-        // volume.setVolume(potNorm);
+        volume.setVolume(potNorm);
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -247,8 +247,8 @@ void setup() {
     setupMic();
     setupSpeaker();
 
-    // xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
-    // xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
 
     // xTaskCreatePinnedToCore(manageLeds, "Light LEDs based on Volume", 8000, NULL, 0, NULL, 2);
     xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);

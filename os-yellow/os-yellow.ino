@@ -42,6 +42,7 @@ uint8_t rx_buffer[512];
 volatile int tx_bytes = 0;
 volatile int rx_bytes = 0;
 
+
 void connectToWiFi() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -62,12 +63,14 @@ void connectToWiFi() {
     Serial.println(WiFi.localIP());
 }
 
+
 void setupLeds() {
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 400);
     FastLED.addLeds<APA102, LED_DATA_PIN, LED_CLOCK_PIN, BGR, DATA_RATE_MHZ(1)>(leds, NUM_LEDS);
     FastLED.setBrightness(80);
     FastLED.setDither(1);
 }
+
 
 void setupMic() {
     auto cfg_in = in.defaultConfig(RX_MODE);
@@ -81,6 +84,7 @@ void setupMic() {
     in.begin(cfg_in);
     Serial.println("Mic is running");
 }
+
 
 void setupSpeaker() {
     auto cfg_out = out.defaultConfig(TX_MODE);
@@ -108,6 +112,7 @@ void setupSpeaker() {
     Serial.println("UDP listening on port " + String(AUDIO_PORT));
 }
 
+
 void streamMic(void* pvParameters) {
     for (;;) {
         int byte_size = in.readBytes(tx_buffer, 512);
@@ -121,6 +126,7 @@ void streamMic(void* pvParameters) {
         }
     }
 }
+
 
 void readSpeaker(void* pvParameters) {
     for (;;) {
@@ -138,6 +144,7 @@ void readSpeaker(void* pvParameters) {
     }
 }
 
+
 void manageWiFi(void* pvParameters) {
     for (;;) {
         Serial.print("wifi strength: ");
@@ -150,6 +157,7 @@ void manageWiFi(void* pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+
 
 void streamPot(void* pvParameters) {
     for (;;) {
@@ -165,11 +173,12 @@ void streamPot(void* pvParameters) {
         Serial.print("streaming pot value: ");
         Serial.println(potNorm);
 
-        // volume.setVolume(potNorm);
+        volume.setVolume(potNorm);
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
+
 
 void readPot(void* pvParameters) {
     for (;;) {
@@ -197,23 +206,6 @@ void readPot(void* pvParameters) {
     }
 }
 
-// 13-bit effective range: top 8 bits → RGB value, bottom 5 bits → global brightness
-void setHighResBrightness(float norm) {  // norm: 0.0 – 1.0
-    uint16_t val = (uint16_t)(norm * 8191);
-    uint8_t  rgb = val >> 5;
-    uint8_t  gb  = (val & 0x1F);
-
-    float r = rgb * (95.0f / 255.0f);
-    float g = rgb * (72.0f / 255.0f);
-    float b = rgb * (42.0f / 255.0f);
-
-    FastLED.setBrightness(gb == 0 ? 1 : gb);
-    for (int i = 0; i < NUM_LEDS; i++) {
-        leds[i] = CRGB((uint8_t)r, (uint8_t)g, (uint8_t)b);
-    }
-    FastLED.show();
-}
-
 
 void testLocalPot(void* pvParameters) {
     for (;;) {
@@ -226,37 +218,22 @@ void testLocalPot(void* pvParameters) {
         FastLED.show();
     }
 }
-                          
-// void manageLeds(void* pvParameters) {
-//     for (;;) {
-//         FastLED.setBrightness(remotePot);
 
-//         for (int i = 0; i < NUM_LEDS; i++) {
-//             leds[i] = CRGB::White;
-//         }
-
-//         vTaskDelay(pdMS_TO_TICKS(1));
-//     }
-// }
 
 void setup() {
     Serial.begin(115200);
 
     connectToWiFi();
     setupLeds();
-    // setupMic();
+    setupMic();
     setupSpeaker();
 
-    // xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
-    // xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
 
-    // xTaskCreatePinnedToCore(manageLeds, "Light LEDs based on Volume", 8000, NULL, 0, NULL, 2);
     xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);
     xTaskCreatePinnedToCore(readPot, "Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
     // xTaskCreatePinnedToCore(testLocalPot, "[TEST] Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
-    // xTaskCreatePinnedToCore(manageWiFi,  "WiFi Diagnostics",               8000, NULL, 0, NULL, 0);
-
-    // xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote", 4096, NULL, 0, NULL, 0);
 }
 
 void loop() {
