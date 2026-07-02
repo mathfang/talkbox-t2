@@ -3,9 +3,9 @@
 #include "WiFiUdp.h"
 #include <FastLED.h>
 
-#define NUM_LEDS    13 //1
-#define LED_PIN     23
-#define LED_TYPE    WS2812B
+#define NUM_LEDS       18 //1
+#define LED_DATA_PIN   23
+#define LED_CLOCK_PIN  18
 
 CRGB leds[NUM_LEDS];
 
@@ -64,7 +64,7 @@ void connectToWiFi() {
 
 void setupLeds() {
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 400);
-    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.addLeds<APA102, LED_DATA_PIN, LED_CLOCK_PIN, BGR, DATA_RATE_MHZ(1)>(leds, NUM_LEDS);
     FastLED.setBrightness(80);
     FastLED.setDither(1);
 }
@@ -181,11 +181,11 @@ void readPot(void* pvParameters) {
             Serial.print("remote pot value: ");
             Serial.println(result);
 
-            for (int i = 4; i < NUM_LEDS; i++) {
-                leds[i] = CHSV(0, 0, result * 51);
+            for (int i = 0; i < NUM_LEDS; i++) {
+                leds[i] = CHSV(40, 200, result * 51);
             }
 
-            // FastLED.show();
+            FastLED.show();
 
         } else {
             vTaskDelay(pdMS_TO_TICKS(1));
@@ -193,6 +193,36 @@ void readPot(void* pvParameters) {
     }
 }
 
+// 13-bit effective range: top 8 bits → RGB value, bottom 5 bits → global brightness
+void setHighResBrightness(float norm) {  // norm: 0.0 – 1.0
+    uint16_t val = (uint16_t)(norm * 8191);
+    uint8_t  rgb = val >> 5;
+    uint8_t  gb  = (val & 0x1F);
+
+    float r = rgb * (95.0f / 255.0f);
+    float g = rgb * (72.0f / 255.0f);
+    float b = rgb * (42.0f / 255.0f);
+
+    FastLED.setBrightness(gb == 0 ? 1 : gb);
+    for (int i = 0; i < NUM_LEDS; i++) {
+        leds[i] = CRGB((uint8_t)r, (uint8_t)g, (uint8_t)b);
+    }
+    FastLED.show();
+}
+
+
+void testLocalPot(void* pvParameters) {
+    for (;;) {
+        float potNorm = 1.0f - (analogRead(POT_PIN) / 4095.0f);
+        
+        for (int i = 0; i < NUM_LEDS; i++) {
+            leds[i] = CHSV(24, 200, potNorm * 255);
+        }
+
+        FastLED.show();
+    }
+}
+                          
 // void manageLeds(void* pvParameters) {
 //     for (;;) {
 //         FastLED.setBrightness(remotePot);
@@ -208,17 +238,18 @@ void readPot(void* pvParameters) {
 void setup() {
     Serial.begin(115200);
 
-    connectToWiFi();
+    // connectToWiFi();
     setupLeds();
-    setupMic();
-    setupSpeaker();
+    // setupMic();
+    // setupSpeaker();
 
-    xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
-    xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
+    // xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
+    // xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
 
     // xTaskCreatePinnedToCore(manageLeds, "Light LEDs based on Volume", 8000, NULL, 0, NULL, 2);
-    xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);
-    xTaskCreatePinnedToCore(readPot, "Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
+    // xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);
+    // xTaskCreatePinnedToCore(readPot, "Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
+    xTaskCreatePinnedToCore(testLocalPot, "[TEST] Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
     // xTaskCreatePinnedToCore(manageWiFi,  "WiFi Diagnostics",               8000, NULL, 0, NULL, 0);
 
     // xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote", 4096, NULL, 0, NULL, 0);

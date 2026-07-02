@@ -15,7 +15,7 @@ const int REMOTE_AUDIO_PORT = 6000;
 const int REMOTE_POT_PORT = 5001;
 
 const int POT_PIN = 34;
-const int POT_PERIOD_MS = 500;
+const int POT_PERIOD_MS = 500;                           
 
 WiFiUDP udp;
 I2SStream in;
