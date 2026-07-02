@@ -17,8 +17,8 @@ CRGB leds[NUM_LEDS];
 const char* SSID              = "bingowireless2g_EXT";
 const char* PASS              = "draco10935";
 // const char* REMOTE_IP      = "10.0.0.47";  // mac mini (bingowireless2g) -3/22/26
-const char* REMOTE_IP      = "10.0.0.135"; // tiny talkbox (bingowireless2g_EXT) -4/20/26 | (bingowireless2g) -3/28/26
-// const char* REMOTE_IP         = "10.0.0.154"; // big talkbox (bingowireless2g_EXT) -4/21/26
+// const char* REMOTE_IP      = "10.0.0.135"; // tiny talkbox (bingowireless2g_EXT) -4/20/26 | (bingowireless2g) -3/28/26
+const char* REMOTE_IP         = "10.0.0.154"; // big talkbox (bingowireless2g_EXT) -4/21/26
 const int   REMOTE_AUDIO_PORT = 6000;
 const int   REMOTE_POT_PORT   = 6001;
 const int   AUDIO_PORT        = 6000;
@@ -245,14 +245,14 @@ void setup() {
     connectToWiFi();
     setupLeds();
     // setupMic();
-    setupSpeaker();
+    // setupSpeaker();
 
     // xTaskCreatePinnedToCore(streamMic,   "Stream Mic to Remote",          16000, NULL, 1, NULL, 1);
     // xTaskCreatePinnedToCore(readSpeaker, "Playback Remote to Speaker", 16000, NULL, 1, NULL, 0);
 
     // xTaskCreatePinnedToCore(manageLeds, "Light LEDs based on Volume", 8000, NULL, 0, NULL, 2);
-    // xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);
-    xTaskCreatePinnedToCore(readPot, "Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
+    xTaskCreatePinnedToCore(streamPot, "Stream Pot to Remote and Manage Volume", 8000, NULL, 0, NULL, 0);
+    // xTaskCreatePinnedToCore(readPot, "Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
     // xTaskCreatePinnedToCore(testLocalPot, "[TEST] Read Remote Pot and Light LEDs", 16000, NULL, 0, NULL, 1);
     // xTaskCreatePinnedToCore(manageWiFi,  "WiFi Diagnostics",               8000, NULL, 0, NULL, 0);
 
