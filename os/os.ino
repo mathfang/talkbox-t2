@@ -16,9 +16,7 @@ CRGB leds[NUM_LEDS];
 
 const char* SSID              = "monkeyphone";
 const char* PASS              = "password";
-// const char* REMOTE_IP      = "10.0.0.47";  // mac mini (bingowireless2g) -3/22/26
-const char* REMOTE_IP      = "172.20.10.3"; // tiny talkbox (bingowireless2g_EXT) -4/20/26 | (bingowireless2g) -3/28/26
-// const char* REMOTE_IP         = "10.0.0.154"; // big talkbox (bingowireless2g_EXT) -4/21/26
+const char* REMOTE_IP      = "172.20.10.3"; // TODO
 const int   REMOTE_AUDIO_PORT = 6000;
 const int   REMOTE_POT_PORT   = 6001;
 const int   AUDIO_PORT        = 6000;
@@ -62,11 +60,12 @@ void connectToWiFi() {
     Serial.println(WiFi.localIP());
 }
 
+// new apa code with 32 bit dimness removal
 void setupLeds() {
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 400);
     FastLED.addLeds<APA102, LED_DATA_PIN, LED_CLOCK_PIN, BGR, DATA_RATE_MHZ(1)>(leds, NUM_LEDS);
     FastLED.setBrightness(80);
-    FastLED.setDither(1);
+    // FastLED.setDither(1);
 }
 
 void setupMic() {
@@ -138,6 +137,8 @@ void readSpeaker(void* pvParameters) {
     }
 }
 
+
+// diagnostics for wifi add buffer remoavl
 void manageWiFi(void* pvParameters) {
     for (;;) {
         Serial.print("wifi strength: ");
@@ -151,6 +152,7 @@ void manageWiFi(void* pvParameters) {
     }
 }
 
+// convert pot to normalized volume + push to rx_buffer
 void streamPot(void* pvParameters) {
     for (;;) {
         // Serial.println(analogRead(POT_PIN));
@@ -171,6 +173,8 @@ void streamPot(void* pvParameters) {
     }
 }
 
+// parse and add
+// 
 void readPot(void* pvParameters) {
     for (;;) {
         int pot_packet_size = pot_udp_in.parsePacket();

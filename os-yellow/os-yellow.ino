@@ -16,9 +16,7 @@ CRGB leds[NUM_LEDS];
 
 const char* SSID              = "monkeyphone";
 const char* PASS              = "password";
-// const char* REMOTE_IP      = "10.0.0.47";  // mac mini (bingowireless2g) -3/22/26
-const char* REMOTE_IP      = "172.20.10.2"; // tiny talkbox (bingowireless2g_EXT) -4/20/26 | (bingowireless2g) -3/28/26
-// const char* REMOTE_IP         = "10.0.0.154"; // big talkbox (bingowireless2g_EXT) -4/21/26
+const char* REMOTE_IP      = "172.20.10.2"; // TODO
 const int   REMOTE_AUDIO_PORT = 6000;
 const int   REMOTE_POT_PORT   = 6001;
 const int   AUDIO_PORT        = 6000;
