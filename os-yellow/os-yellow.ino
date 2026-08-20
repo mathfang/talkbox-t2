@@ -1,5 +1,5 @@
 /*
- * TalkBox handset — "blue"
+ * TalkBox handset — "yellow"
  *
  * Two handsets talk to each other over the public internet by way of a small
  * UDP relay running on a VPS (see ../relay/relay.py).  Neither handset needs a
@@ -28,10 +28,10 @@
 // Per-device configuration.  This block is the ONLY thing that differs between
 // os/os.ino and os-yellow/os-yellow.ino.
 // ─────────────────────────────────────────────────────────────────────────────
-static const char* WIFI_SSID   = "monkeyphone";
-static const char* WIFI_PASS   = "password";
+static const char* WIFI_SSID   = "bingowireless2g_EXT";
+static const char* WIFI_PASS   = "draco10935";
 
-static const char* DEVICE_ID   = "blue";        // must be unique within the room
+static const char* DEVICE_ID   = "yellow";        // must be unique within the room
 static const char* ROOM_ID     = "talkbox";     // both handsets share this
 static const char* ROOM_SECRET = "change-me";   // must match the relay's --secret
 
@@ -356,6 +356,7 @@ static void setupLeds() {
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 400);
     FastLED.addLeds<APA102, LED_DATA_PIN, LED_CLOCK_PIN, BGR, DATA_RATE_MHZ(1)>(leds, NUM_LEDS);
     FastLED.setBrightness(80);
+    FastLED.setDither(1);
 }
 
 static void setupMic() {
