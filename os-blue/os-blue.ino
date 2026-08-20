@@ -81,6 +81,7 @@ static const int CHANNELS        = 1;
 // One audio packet = 512 bytes = 256 samples = 16 ms of speech.
 static const size_t AUDIO_BLOCK  = 512;
 static const size_t BYTES_PER_MS = (SAMPLE_RATE * (BITS_PER_SAMPLE / 8) * CHANNELS) / 1000;  // 32
+static const size_t AUDIO_BLOCK_MS = AUDIO_BLOCK / BYTES_PER_MS;   // 16 ms of speech per block
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Jitter buffer sizing.  A cross-country path adds ~60-80 ms of latency plus
@@ -98,130 +99,108 @@ static const size_t JITTER_MAX      = JITTER_MAX_MS      * BYTES_PER_MS;
 static const size_t JITTER_CAPACITY = JITTER_CAPACITY_MS * BYTES_PER_MS;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Echo control
+// I2S DMA depth
+//
+// This sets the latency of the entire call, and it is the largest number in
+// this file.  AudioTools multiplies buffer_size by buffer_count, divides by
+// the frame size (2 bytes: 16-bit mono), and hands the result to IDF as
+// dma_frame_num.  IDF then allocates dma_desc_num of those, and AudioTools
+// leaves that at IDF's default of 6.  So the depth, in samples, is
+//
+//     buffer_size * buffer_count / 2 * 6
+//
+// The library defaults are 512 and 6, i.e. 9216 samples — 576 ms per
+// direction.  i2s_channel_write() blocks until every byte is copied into DMA,
+// so in steady state that queue sits full, and a sample handed to the speaker
+// reaches the amplifier well over half a second later.
+//
+// That delay is also the echo path: what the mic hears is what we queued 576
+// ms ago plus the couple of ms it takes to cross the box.  It is why the
+// previous suppressor needed a 500 ms memory of what it had played — it was
+// not measuring the room, it was measuring this buffer.  A canceller has to
+// span the delay with an adaptive filter and nobody runs 9216 taps, so
+// shrinking this is the prerequisite for cancelling anything at all.
+//
+// 128 x 2 gives 768 samples, 48 ms per direction.  Watch "under=" in the
+// stats line: DMA is what absorbs task-scheduling jitter, and if the speaker
+// task is ever held off for longer than this the buffer runs dry and clicks.
+// Raise I2S_DMA_CHUNKS to 3 or 4 before reaching for anything else.
+//
+// (Not named I2S_BUFFER_SIZE / I2S_BUFFER_COUNT: AudioTools already #defines
+// both of those as its library-wide defaults, and a constant of the same name
+// would be substituted away before the compiler ever saw it.)
+// ─────────────────────────────────────────────────────────────────────────────
+static const int I2S_DMA_CHUNK_BYTES = 128;
+static const int I2S_DMA_CHUNKS      = 2;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Echo delay probe
 //
 // The mic sits inches from the speaker, so every word the peer says reaches
-// their own ear again one round trip later.  Their box does the same to us, so
-// a single word recirculates — A's speaker -> A's mic -> B's speaker -> B's
-// mic -> A's speaker — and a loop gain anywhere near 1 is what turns one echo
-// into the three or four that are actually audible.
+// their own ear again one round trip later.  Cancelling that means
+// subtracting a filtered copy of what we played from what the mic heard, and
+// the filter has to span the delay between the two.  So the first thing worth
+// knowing is what that delay actually is.
 //
-// Breaking the loop at ONE point collapses the whole chain, so this is the
-// classic speakerphone trick rather than a real adaptive canceller: hold the
-// mic down in proportion to how much of what it hears we are to blame for.  It
-// costs one pass of abs() over each block plus a short scan, which is
-// affordable on the audio core in a way that a 16 kHz NLMS filter would not be.
+// It is measured rather than assumed.  Every block, taskSpeaker records the
+// level of what it played and taskMicTx records the level of what it heard;
+// correlating those two envelopes at every lag out to PROBE_MAX_LAG gives a
+// peak at the lag that lines them up, and that lag is the echo path delay.
 //
-// It is not half-duplex.  Attenuation is proportional, not a gate, so talking
-// over the peer works and the worst case is a quieter mic rather than a dead
-// one.  A real canceller subtracts the echo and would do better during
-// double-talk; this only turns the gain down, so some echo rides along with
-// your voice whenever you and the peer talk at once.  That is the trade.
+// Envelopes, not waveforms.  Correlating the samples themselves would resolve
+// to a single sample and cost hundreds of times more; a block envelope costs
+// three multiply-adds per lag per block and resolves to 16 ms, which is all
+// the precision needed to choose a filter length.
 //
-// Levels below are the mean |sample| of one block, i.e. 0..32767.
+// This measures only.  It never touches the audio.
 // ─────────────────────────────────────────────────────────────────────────────
-#define ENABLE_ECHO_SUPPRESSION 1
+#define ENABLE_DELAY_PROBE 1
 
-// Playback quieter than this is left alone entirely.  Its only job is to keep
-// us from dividing by the noise floor, so it sits just above room tone and no
-// higher.  A gate needed this to be large — that was the only thing standing
-// between it and latching shut forever — but an expander degrades smoothly, so
-// a low value costs nothing: quiet playback yields a ratio near 1, hence a
-// gain near 1, hence no attenuation.
-//
-// Compare against "spk=" in the stats line, which is the loudest block played
-// in the last two seconds.  If spk never climbs past this while the peer is
-// talking, nothing will ever engage.
-static const float ECHO_FAR_ACTIVE = 30.0f;
+// Longest delay considered.  64 blocks is 1.02 s, comfortably past the 576 ms
+// the library defaults produce, so the probe still reads correctly if the DMA
+// depth above is put back to 512 x 6 for a before-and-after comparison.
+static const size_t PROBE_MAX_LAG = 64;
+static const size_t PROBE_RING    = PROBE_MAX_LAG + 1;
 
-// Ceiling on the pot's volume boost, and the single most important number
-// here — it is a stability limit, not a taste setting.
+// Blocks of evidence behind each estimate.  512 blocks is 8.2 s, long enough
+// that a few syllables of near-end speech cannot move the peak.
+static const uint32_t PROBE_WINDOW = 512;
+
+// Playback quieter than this teaches nothing about the echo path, so those
+// blocks are skipped rather than diluting the correlation with silence.  It
+// sits just above room tone; compare against "spk=" in the stats line.
+static const float PROBE_FAR_ACTIVE = 30.0f;
+
+// How well the two envelopes have to line up before the answer is worth
+// printing.  The correlation at the winning lag is not just a nicety here — it
+// is what separates a real measurement from an argmax over noise.  Simulated
+// against a synthetic call: with this hardware's coupling (0.84 to 1.87) every
+// window lands on the right lag at r = 0.75 to 0.83 even against a talker
+// louder than the echo, while a case weak enough to lose the peak wanders all
+// over the range and drops below 0.30 whenever it does.  0.40 sits in the gap.
 //
-// Per hop the loop multiplies by (coupling x mic_gain x volume), and the mic
-// gain has to be near 1 whenever someone is actually talking, or they are not
-// heard.  So stability rests on coupling x volume alone.  Measured coupling
-// on this hardware — "mic" over "spk" in the stats while only the far end
-// talks — runs 0.84 to 1.87, i.e. the mic picks the speaker up LOUDER than
-// the samples being sent to it.  At that coupling anything above about 1.0
-// oscillates: a single table knock was measured ramping spk 1977 -> 14974
-// over eight seconds, which is the ringing heard after someone stops talking.
+// Below it the delay is withheld rather than guessed at, because a plausible
+// wrong number read off a log is worse than no number.
+static const float PROBE_MIN_CORR = 0.40f;
+
+// Reported when the correlation is too weak to believe.
+static const uint32_t PROBE_NO_DELAY = 0xFFFFFFFFul;
+
+// Ceiling on the pot's volume boost.
 //
-// LEFT AT 5.0 DELIBERATELY, which is roughly five times that limit and so
-// does oscillate.  Dropping it to 1.0 stops the howl but makes the handset
-// much quieter, and the loudness was worth more than the stability here.  The
-// number is parked at the original value; the analysis is kept because it is
-// the thing worth knowing if this is ever picked back up.
+// Per hop the loop multiplies by (coupling x volume), where coupling is the
+// mic level over the speaker samples that provoked it.  Measured on this
+// hardware it runs 0.84 to 1.87 — the mic picks the speaker up LOUDER than
+// what is sent to it — so at 5.0 the round trip sits roughly 35 dB above
+// unity, and a single table knock builds into a howl.
 //
-// No echo suppressor rescues a loop this hot: a howl and a loud talker look
-// identical by level, so the suppressor opens up and feeds it.  Lowering the
-// coupling — more distance or isolation between speaker and mic — is the only
-// fix that buys back loudness and duplex at the same time.  Everything in
-// firmware below is damage control.
+// Left at 5.0 anyway.  The loudness is worth more than the stability, and a
+// canceller subtracts the echo instead of ducking it: ~20 dB of cancellation
+// plus a light residual suppressor covers that gap without handing the volume
+// back.  Worth knowing that VolumeStream clips at +/-32767, so this much boost
+// also hard-clips loud passages, and clipping is the main thing limiting how
+// much of the echo a linear canceller can remove.
 static const float MAX_VOLUME = 5.0f;
-
-// How far back to look before blaming our own speaker for what the mic hears.
-// Our audio does NOT reach the mic at the moment we queue it: it waits out the
-// I2S TX DMA depth, crosses the room, then waits out the I2S RX DMA depth on
-// the way back in.  A few hundred milliseconds, and not observable from here.
-//
-// Hence a flat max over the whole window rather than a level that decays from
-// the moment of playback.  A decaying one stops attenuating while the echo is
-// still in flight, so the tail of every utterance gets through — which is
-// heard, correctly, as an echo arriving a beat late.
-static const uint32_t ECHO_TAIL_MS  = 500;
-static const size_t   ECHO_BLOCK_MS = AUDIO_BLOCK / BYTES_PER_MS;    // 16 ms of speech per block
-static const size_t   ECHO_HISTORY  = ECHO_TAIL_MS / ECHO_BLOCK_MS;  // blocks of playback remembered
-
-// The mic gain is a smooth function of how far the mic is beating the speaker
-// rather than an on/off gate, and this is its sharpness.  A hard gate has to
-// pick a threshold, and any threshold is wrong in one direction or the other:
-// too low and the echo returns, too high and it can never open — the mic level
-// needed would exceed what 16 bits can represent, so the peer's voice gets
-// flattened along with the echo and the call goes one-way.
-//
-// An expander has no threshold to get wrong.  Quiet-versus-playback fades
-// down, loud-versus-playback passes, and everything between is proportional.
-static const int   ECHO_KNEE       = 3;      // gain = (mic / expected echo) ^ KNEE
-// Also the thing that decides whether the whole system oscillates, which is
-// a stronger constraint than any echo target.  Round-trip loop gain is
-//     (coupling x floor x volume)^2
-// and it must stay well under 1 or a single thump builds into a howl at the
-// round-trip period.  Measured coupling on this hardware is around 1.5 and
-// the pot used to boost by up to 5x, so 0.15 gave 1.27 — unstable, which is
-// exactly what the logs caught: one table knock ramping spk 1977 -> 14974
-// over eight seconds.
-//
-// This alone cannot buy stability back, because the floor only applies while
-// the suppressor believes it is hearing echo, and a howl looks exactly like a
-// loud talker.  MAX_VOLUME above is what actually bounds the loop; this just
-// keeps the residual quiet once the loop is already stable.
-static const float ECHO_GAIN_FLOOR = 0.04f;
-
-// The mic and the speaker are NOT in the same units.  A digital mic's output
-// for ordinary speech is far smaller than the sample values we hand the
-// amplifier, the more so with the pot's boost applied, so "mic quieter than
-// playback" stays true even while you talk straight into it.  What matters is
-// the RATIO of the two, which is a property of the box rather than of the
-// volume: turning the pot up raises playback and the echo it provokes by the
-// same factor, so the ratio holds still while both levels move by 30x.
-//
-// Which is why it is learned here instead of typed in.  A hand-set constant
-// has to be re-derived every time the knob moves; this does not.
-static const float    ECHO_MARGIN        = 2.0f;   // how far above the echo your voice must sit
-static const uint32_t ECHO_LEARN_BLOCKS  = 64;     // ~1 s of evidence per update
-static const float    ECHO_NEAR_FLOOR    = 10.0f;  // a silent mic teaches nothing
-static const float    ECHO_COUPLING_INIT = 0.50f;
-static const float    ECHO_COUPLING_MIN  = 0.02f;
-static const float    ECHO_COUPLING_MAX  = 1.00f;
-
-// Asymmetric on purpose.  Under-estimating only costs some suppression, while
-// over-estimating mutes the call outright — and your own voice can only push
-// the measurement up, never down.  So: fall quickly, rise grudgingly.
-static const float    ECHO_LEARN_DOWN    = 0.80f;  // at most 20% down per update
-static const float    ECHO_LEARN_UP      = 1.08f;  // at most  8% up   per update
-
-static const float ECHO_ATTACK  = 1.00f;   // follow downward at once; the in-block ramp avoids the click
-static const float ECHO_RELEASE = 0.25f;   // per block, gain -> open (~60 ms, so a syllable onset survives)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire protocol (shared with relay.py — keep the two in sync)
@@ -319,17 +298,19 @@ static volatile uint32_t stat_late_audio = 0;
 static volatile uint32_t stat_underruns  = 0;
 static volatile uint32_t stat_overruns   = 0;
 
-// Echo-suppressor peaks since the last stats line.  Peaks rather than
-// instantaneous samples, because the interesting question is whether playback
-// ever got loud enough to matter and whether the mic ever actually ducked —
-// a snapshot taken every 2 s would miss both.
-static volatile float stat_echo_spk  = 0.0f;   // loudest block we played
-static volatile float stat_echo_mic  = 0.0f;   // loudest block the mic heard
-static volatile float stat_echo_duck = 1.0f;   // deepest attenuation applied
-static volatile float stat_echo_gsum = 0.0f;   // ... and the mean, which is the
-static volatile uint32_t stat_echo_gn = 0;     // one that says whether you were heard
-static volatile float stat_echo_rmin = 1e9f;   // raw mic/playback ratio, low end
-static volatile float stat_echo_rmax = 0.0f;   // ... and high end
+// Peak levels since the last stats line.  Peaks rather than instantaneous
+// samples, because the interesting question is whether playback ever got loud
+// enough to matter and whether the mic ever heard it — a snapshot taken every
+// 2 s would miss both.
+static volatile float stat_echo_spk = 0.0f;   // loudest block we played
+static volatile float stat_echo_mic = 0.0f;   // loudest block the mic heard
+
+// Latest output of the delay probe.  Written by taskMicTx once per window,
+// read by taskStats; probe_blocks stays 0 until the first window completes,
+// which is what the stats line reads as "measuring".
+static volatile uint32_t probe_delay_ms = 0;
+static volatile float    probe_corr     = 0.0f;
+static volatile uint32_t probe_blocks   = 0;
 
 // Times the jitter buffer skipped forward to claw back latency.  Each one
 // splices two unrelated points of the waveform together, which is heard as a
@@ -431,11 +412,11 @@ private:
 static JitterBuffer jitter;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Echo suppressor.  taskSpeaker reports what it just handed to the amplifier;
-// taskMicTx ducks the mic whenever the block coming in looks like that same
-// audio arriving back through the air.
+// Echo delay probe.  taskSpeaker reports the level of every block it hands the
+// amplifier; taskMicTx reports the level of every block the mic returns, and
+// correlates the two to find the lag between them.
 // ─────────────────────────────────────────────────────────────────────────────
-#if ENABLE_ECHO_SUPPRESSION
+#if ENABLE_DELAY_PROBE
 
 // Mean |sample| over a PCM block: the cheapest level estimate that still
 // tracks speech, and it needs no sqrt.
@@ -452,111 +433,115 @@ static float blockLevel(const uint8_t* data, size_t len) {
     return (float)sum / (float)n;
 }
 
-// What we have played recently, one level per block, owned by taskSpeaker.
-static float  echo_far_hist[ECHO_HISTORY];
-static size_t echo_far_pos = 0;
+// Levels of what we recently played, written by taskSpeaker and read by
+// taskMicTx.  probe_ref_pos points at the slot the NEXT block will occupy, so
+// the newest entry is the one before it.  32-bit aligned floats, so a race
+// costs at most one stale block — cheaper than a mutex on the audio path, and
+// one block of noise is invisible under a 512-block average.
+static volatile float  probe_ref[PROBE_RING];
+static volatile size_t probe_ref_pos = 0;
 
-// Loudest of the above.  Written by taskSpeaker, read by taskMicTx: a 32-bit
-// aligned float, so a race can only ever cost one stale block.
-static volatile float echo_far_ref = 0.0f;
-
-// Learned speaker-to-mic ratio, reported as "c=" so it can be sanity-checked
-// from the serial log rather than taken on faith.
-static volatile float echo_coupling = ECHO_COUPLING_INIT;
-
-// Evidence accumulating toward the next update to it.
-static float    echo_learn_spk = 0.0f;
-static float    echo_learn_mic = 0.0f;
-static uint32_t echo_learn_n   = 0;
+// Sums accumulating toward the next estimate.  Owned by taskMicTx alone.
+// x is the mic envelope, y the playback envelope at each lag; correlating the
+// two needs Sxy, Sx, Sxx, and per-lag Sy and Syy.
+static float    probe_sxy[PROBE_RING];
+static float    probe_sy [PROBE_RING];
+static float    probe_syy[PROBE_RING];
+static float    probe_sx  = 0.0f;
+static float    probe_sxx = 0.0f;
+static uint32_t probe_n   = 0;
 
 // Called once per played block, including the silent ones — the window only
 // slides forward if it keeps being fed.
-static void echoNotePlayed(const uint8_t* data, size_t len) {
-    echo_far_hist[echo_far_pos] = blockLevel(data, len);
-    echo_far_pos = (echo_far_pos + 1) % ECHO_HISTORY;
+static void probeNotePlayed(const uint8_t* data, size_t len) {
+    const float level = blockLevel(data, len);
+    if (level > stat_echo_spk) stat_echo_spk = level;
 
-    // A rescan every 16 ms, which is cheaper than maintaining the running
-    // structure that would avoid it.
-    float peak = 0.0f;
-    for (size_t i = 0; i < ECHO_HISTORY; i++) {
-        if (echo_far_hist[i] > peak) peak = echo_far_hist[i];
-    }
-    echo_far_ref = peak;
+    const size_t pos = probe_ref_pos;
+    probe_ref[pos]   = level;
+    probe_ref_pos    = (pos + 1 == PROBE_RING) ? 0 : pos + 1;
 }
 
-// Scales a mic block in place, holding it down in proportion to how much of it
-// is our own speaker coming back around.  The gain ramps across the block
-// rather than stepping at the boundary, which is what keeps it from clicking.
-static void echoSuppress(uint8_t* data, size_t len) {
-    static float gain = 1.0f;
+// Called once per captured block.  Reads the mic, never writes it.
+static void probeNoteCaptured(const uint8_t* data, size_t len) {
+    const float level = blockLevel(data, len);
+    if (level > stat_echo_mic) stat_echo_mic = level;
 
-    const float far_level  = echo_far_ref;
-    const float near_level = blockLevel(data, len);
+    // One read of the writer's index, so the scan below sees a view that is at
+    // worst one block stale rather than one that slides underneath it.
+    const size_t pos = probe_ref_pos;
 
-    // Below 1 the mic has no more than the echo we would predict, so most of
-    // what it holds is our own audio coming back; above 1 someone is genuinely
-    // talking over it.  Raising that to ECHO_KNEE sharpens the distinction
-    // without ever turning it into a cliff.
-    // Learn the room from the PEAKS of a whole second, not block against
-    // block.  The echo of a block arrives a few hundred ms after we queue it,
-    // so dividing an instantaneous mic level by a windowed playback level
-    // compares two different moments: in the gaps between words the mic falls
-    // silent while the playback window is still latched high, the quotient
-    // collapses, and a low-watermark estimator would ratchet itself down to
-    // nothing.  Two peaks measured over the same interval need no alignment.
-    if (far_level  > echo_learn_spk) echo_learn_spk = far_level;
-    if (near_level > echo_learn_mic) echo_learn_mic = near_level;
+    // Nothing played inside the whole lag window, so nothing in this block can
+    // be echo of ours at any lag.  Skipping keeps silence out of the sums
+    // instead of burying the correlation under it.
+    float far_peak = 0.0f;
+    for (size_t i = 0; i < PROBE_RING; i++) {
+        const float v = probe_ref[i];
+        if (v > far_peak) far_peak = v;
+    }
+    if (far_peak <= PROBE_FAR_ACTIVE) return;
 
-    if (++echo_learn_n >= ECHO_LEARN_BLOCKS) {
-        if (echo_learn_spk > ECHO_FAR_ACTIVE && echo_learn_mic > ECHO_NEAR_FLOOR) {
-            const float observed = echo_learn_mic / echo_learn_spk;
-            const float c        = echo_coupling;
-            const float moved    = (observed < c)
-                                 ? max(c * ECHO_LEARN_DOWN, observed)
-                                 : min(c * ECHO_LEARN_UP,   observed);
-            echo_coupling = constrain(moved, ECHO_COUPLING_MIN, ECHO_COUPLING_MAX);
+    // Scaled to roughly 0..1 so the sums below stay in the range where a
+    // float still carries every bit of them.
+    static const float SCALE = 1.0f / 32768.0f;
+
+    const float x = level * SCALE;
+    probe_sx  += x;
+    probe_sxx += x * x;
+
+    size_t idx = (pos == 0) ? PROBE_RING - 1 : pos - 1;   // newest block played
+    for (size_t lag = 0; lag < PROBE_RING; lag++) {
+        const float y = probe_ref[idx] * SCALE;
+        probe_sxy[lag] += x * y;
+        probe_sy [lag] += y;
+        probe_syy[lag] += y * y;
+        idx = (idx == 0) ? PROBE_RING - 1 : idx - 1;
+    }
+
+    if (++probe_n < PROBE_WINDOW) return;
+
+    // Pearson correlation per lag, which is what makes the peak comparable
+    // between lags and between windows: a raw dot product rewards whichever
+    // lag happens to line up with the loudest playback, and a loud call would
+    // read as a confident one no matter where the peak sat.
+    const float n    = (float)probe_n;
+    const float varx = n * probe_sxx - probe_sx * probe_sx;
+
+    float  best_corr = 0.0f;
+    size_t best_lag  = 0;
+    if (varx > 0.0f) {
+        for (size_t lag = 0; lag < PROBE_RING; lag++) {
+            const float vary = n * probe_syy[lag] - probe_sy[lag] * probe_sy[lag];
+            if (vary <= 0.0f) continue;
+            const float cov  = n * probe_sxy[lag] - probe_sx * probe_sy[lag];
+            const float corr = cov / sqrtf(varx * vary);
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_lag  = lag;
+            }
         }
-        echo_learn_spk = 0.0f;
-        echo_learn_mic = 0.0f;
-        echo_learn_n   = 0;
     }
 
-    float target = 1.0f;
-    if (far_level > ECHO_FAR_ACTIVE) {
-        const float raw = near_level / far_level;   // reported as "r="
-        if (raw < stat_echo_rmin) stat_echo_rmin = raw;
-        if (raw > stat_echo_rmax) stat_echo_rmax = raw;
+    probe_delay_ms = (best_corr >= PROBE_MIN_CORR)
+                   ? (uint32_t)(best_lag * AUDIO_BLOCK_MS)
+                   : PROBE_NO_DELAY;
+    probe_corr     = best_corr;
+    probe_blocks   = probe_n;
 
-        const float ratio    = raw / (echo_coupling * ECHO_MARGIN);
-        float       expanded = ratio;
-        for (int i = 1; i < ECHO_KNEE; i++) expanded *= ratio;
-        target = constrain(expanded, ECHO_GAIN_FLOOR, 1.0f);
-    }
-
-    const float prev = gain;
-    gain += (target - gain) * ((target < gain) ? ECHO_ATTACK : ECHO_RELEASE);
-    if (far_level  > stat_echo_spk)  stat_echo_spk  = far_level;
-    if (near_level > stat_echo_mic)  stat_echo_mic  = near_level;
-    if (gain       < stat_echo_duck) stat_echo_duck = gain;
-    stat_echo_gsum += gain;
-    stat_echo_gn++;
-
-    int16_t*     s = (int16_t*)data;
-    const size_t n = len / 2;
-    if (n == 0) return;
-
-    const float step = (gain - prev) / (float)n;
-    float       g    = prev;
-    for (size_t i = 0; i < n; i++, g += step) {
-        s[i] = (int16_t)(s[i] * g);
+    probe_sx  = 0.0f;
+    probe_sxx = 0.0f;
+    probe_n   = 0;
+    for (size_t lag = 0; lag < PROBE_RING; lag++) {
+        probe_sxy[lag] = 0.0f;
+        probe_sy [lag] = 0.0f;
+        probe_syy[lag] = 0.0f;
     }
 }
 
-#else   // ENABLE_ECHO_SUPPRESSION
+#else   // ENABLE_DELAY_PROBE
 
-static inline void echoNotePlayed(const uint8_t*, size_t) {}
-static inline void echoSuppress(uint8_t*, size_t) {}
-static const float echo_coupling = 0.0f;   // the stats line reports it either way
+static inline void probeNotePlayed(const uint8_t*, size_t) {}
+static inline void probeNoteCaptured(const uint8_t*, size_t) {}
 
 #endif
 
@@ -697,6 +682,8 @@ static void setupMic() {
     cfg_in.pin_ws          = MIC_WS_PIN;
     cfg_in.pin_data        = MIC_DATA_PIN;
     cfg_in.port_no         = 0;
+    cfg_in.buffer_size     = I2S_DMA_CHUNK_BYTES;
+    cfg_in.buffer_count    = I2S_DMA_CHUNKS;
     in.begin(cfg_in);
     Serial.println("Mic is running");
 }
@@ -710,6 +697,8 @@ static void setupSpeaker() {
     cfg_out.pin_ws          = SPK_WS_PIN;
     cfg_out.pin_data        = SPK_DATA_PIN;
     cfg_out.port_no         = 1;
+    cfg_out.buffer_size     = I2S_DMA_CHUNK_BYTES;
+    cfg_out.buffer_count    = I2S_DMA_CHUNKS;
 
     auto vcfg_out = volume.defaultConfig();
     vcfg_out.copyFrom(cfg_out);
@@ -736,9 +725,9 @@ static void taskMicTx(void*) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        // Runs even with the link down, so the gate is already settled by the
-        // time a call comes up.
-        echoSuppress(tx_buffer, n);
+        // Runs even with the link down.  Nothing is playing then, so the probe
+        // skips those blocks itself rather than being told to.
+        probeNoteCaptured(tx_buffer, n);
         if (link_state == LINK_UP) {
             if (!sendToRelay(TB_AUDIO, tx_audio_seq++, tx_buffer, n)) stat_tx_fail++;
         }
@@ -860,7 +849,7 @@ static void taskSpeaker(void*) {
                 primed = true;
             } else {
                 volume.write(silence, AUDIO_BLOCK);
-                echoNotePlayed(silence, AUDIO_BLOCK);
+                probeNotePlayed(silence, AUDIO_BLOCK);
                 continue;
             }
         }
@@ -869,15 +858,17 @@ static void taskSpeaker(void*) {
             volume.write(play_buffer, AUDIO_BLOCK);
             // Measured after the write because VolumeStream scales in place:
             // this is what actually reached the amplifier, pot position and
-            // all, which is exactly the level the mic will hear.
-            echoNotePlayed(play_buffer, AUDIO_BLOCK);
+            // all, which is exactly what the mic will hear.  Keeping the tap
+            // on this side of the volume means the echo path the probe sees —
+            // and the canceller after it — does not move when the knob does.
+            probeNotePlayed(play_buffer, AUDIO_BLOCK);
         } else {
             // Ran dry: emit silence and re-prime rather than stuttering on
             // whatever trickles in next.
             stat_underruns++;
             primed = false;
             volume.write(silence, AUDIO_BLOCK);
-            echoNotePlayed(silence, AUDIO_BLOCK);
+            probeNotePlayed(silence, AUDIO_BLOCK);
         }
     }
 }
@@ -1061,23 +1052,35 @@ static void taskStats(void*) {
         uint32_t over  = stat_overruns;   stat_overruns   = 0;
         float    espk  = stat_echo_spk;   stat_echo_spk   = 0.0f;
         float    emic  = stat_echo_mic;   stat_echo_mic   = 0.0f;
-        float    educk = stat_echo_duck;  stat_echo_duck  = 1.0f;
-        float    egsum = stat_echo_gsum;  stat_echo_gsum  = 0.0f;
-        uint32_t egn   = stat_echo_gn;    stat_echo_gn    = 0;
-        unsigned long emean = egn ? (unsigned long)(egsum / egn * 100.0f) : 100;
-        float    ermin = stat_echo_rmin;  stat_echo_rmin  = 1e9f;
-        float    ermax = stat_echo_rmax;  stat_echo_rmax  = 0.0f;
         uint32_t trim  = stat_trims;      stat_trims      = 0;
         uint32_t txf   = stat_tx_fail;    stat_tx_fail    = 0;
 
-        // rmin stays at its sentinel if playback never crossed the threshold.
-        unsigned long rlo = (ermin <= ermax) ? (unsigned long)(ermin * 100.0f) : 0;
-        unsigned long rhi = (unsigned long)(ermax * 100.0f);
+        // The probe's window is 8 s and this line comes every 2 s, so the same
+        // estimate is reported four times over.  Left that way on purpose: a
+        // reading that holds still across repeats is a reading you can trust,
+        // and one that jumps around is telling you the correlation is weak.
+        char delay_str[40];
+#if ENABLE_DELAY_PROBE
+        if (!probe_blocks) {
+            snprintf(delay_str, sizeof(delay_str), "measuring");
+        } else if (probe_delay_ms == PROBE_NO_DELAY) {
+            // Far end too quiet, or a near-end talker drowning the echo.
+            snprintf(delay_str, sizeof(delay_str), "weak r=%ld%%",
+                     (long)(probe_corr * 100.0f));
+        } else {
+            snprintf(delay_str, sizeof(delay_str), "%lums r=%ld%% n=%lu",
+                     (unsigned long)probe_delay_ms,
+                     (long)(probe_corr * 100.0f),
+                     (unsigned long)probe_blocks);
+        }
+#else
+        snprintf(delay_str, sizeof(delay_str), "off");
+#endif
 
         Serial.printf(
             "[link=%s rssi=%d] tx=%lu B/s rx=%lu B/s | jitter=%lu ms trim=%lu "
             "lost=%lu late=%lu under=%lu over=%lu txfail=%lu | "
-            "echo spk=%lu mic=%lu r=%lu-%lu%% c=%lu%% gain=%lu%% (min %lu%%) | heap=%lu\n",
+            "echo spk=%lu mic=%lu delay=%s | heap=%lu\n",
             linkStateName(link_state), WiFi.RSSI(),
             (unsigned long)(tx * 1000 / period_ms),
             (unsigned long)(rx * 1000 / period_ms),
@@ -1086,9 +1089,7 @@ static void taskStats(void*) {
             (unsigned long)lost, (unsigned long)late,
             (unsigned long)under, (unsigned long)over, (unsigned long)txf,
             (unsigned long)espk, (unsigned long)emic,
-            rlo, rhi,
-            (unsigned long)(echo_coupling * 100.0f),
-            emean, (unsigned long)(educk * 100.0f),
+            delay_str,
             (unsigned long)ESP.getFreeHeap());
     }
 }
