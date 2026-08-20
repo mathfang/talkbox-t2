@@ -23,14 +23,12 @@
 #include "WiFi.h"
 #include "WiFiUdp.h"
 #include <FastLED.h>
+#include <WiFiManager.h>   // tzapu/WiFiManager, via Library Manager
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-device configuration.  This block is the ONLY thing that differs between
-// os/os.ino and os-yellow/os-yellow.ino.
+// os-blue/os-blue.ino and os-yellow/os-yellow.ino.
 // ─────────────────────────────────────────────────────────────────────────────
-static const char* WIFI_SSID   = "monkeyphone";
-static const char* WIFI_PASS   = "password";
-
 static const char* DEVICE_ID   = "blue";        // must be unique within the room
 static const char* ROOM_ID     = "talkbox";     // both handsets share this
 static const char* ROOM_SECRET = "change-me";   // must match the relay's --secret
@@ -62,6 +60,16 @@ static const uint16_t LOCAL_PORT = 6000;
 static const int POT_PIN       = 34;
 static const int POT_PERIOD_MS = 33;    // ~30 Hz pot updates
 static const int LED_PERIOD_MS = 33;    // ~30 Hz LED refresh
+
+// "Speak up" cue: while the peer has their volume up but ours is still down,
+// the LEDs pulse instead of sitting steady, so a knob left at zero is obvious
+// from across the room.  The depth ramps rather than snaps, so raising our own
+// knob fades the pulse out into a steady glow.
+static const float   POT_QUIET_LEVEL   = 0.10f;   // 10% of pot travel
+static const uint8_t PULSE_RAMP_STEP   = 8;       // depth per frame; ~1 s full fade
+static const uint8_t PULSE_RATE        = 4;       // phase per frame; ~2 s period
+static const uint8_t PULSE_RATE_SETUP  = 2;       // half pace; ~4 s "come configure me"
+static const int PORTAL_PERIOD_MS = 20;   // portal HTTP/DNS service interval
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Audio format
@@ -134,18 +142,21 @@ static const size_t MAX_PACKET = sizeof(TbHeader) + AUDIO_BLOCK;
 static const uint32_t PEER_TTL_MS        = 5000;
 static const uint32_t REGISTER_PERIOD_MS = 1000;   // also keeps the NAT hole open
 static const uint32_t WIFI_RETRY_MS      = 15000;  // how often to force a fresh WiFi attempt
+static const uint32_t WIFI_GRACE_MS      = 10000;  // an attempt this young still reads as "connecting"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Link state
 // ─────────────────────────────────────────────────────────────────────────────
 enum LinkState : uint8_t {
-    LINK_WIFI_DOWN,     // no WiFi association
+    LINK_SETUP,         // unconfigured: setup hotspot open, waiting for a browser
+    LINK_CONNECTING,    // configured, association attempt still young
+    LINK_WIFI_DOWN,     // association gone and not coming back on its own
     LINK_NO_RELAY,      // WiFi up, relay unresolved / no ACK yet
     LINK_WAITING_PEER,  // registered with the relay, peer not online
     LINK_UP,            // both handsets registered — audio flows
 };
 
-static volatile LinkState link_state = LINK_WIFI_DOWN;
+static volatile LinkState link_state = LINK_SETUP;
 static volatile uint32_t  peer_seen_until_ms = 0;   // set by rx task, read by senders
 
 static inline bool peerPresent() {
@@ -170,6 +181,7 @@ static uint16_t tx_audio_seq = 0;
 static uint16_t tx_pot_seq   = 0;
 
 static volatile float remote_pot = 0.0f;   // 0..1, drives our LEDs
+static volatile float local_pot  = 0.0f;   // 0..1, our own knob, published by taskPotTx
 
 // Diagnostics counters, reset each time the stats task prints them.  Several
 // tasks increment these without locking: a torn count would only ever skew a
@@ -308,27 +320,63 @@ static void rebindSocket() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Setup
 // ─────────────────────────────────────────────────────────────────────────────
+// Normalized pot position, 0 = fully down, 1 = fully up.  The wiper reads high
+// when the knob is down, so the raw value is inverted here rather than at each
+// call site.
+static float readPot() {
+    return constrain(1.0f - (analogRead(POT_PIN) / 4095.0f), 0.0f, 1.0f);
+}
+
+static WiFiManager wm;
+
+// SSID of the setup hotspot, e.g. "talkbox-blue".
+static void setupApName(char* dst, size_t cap) {
+    snprintf(dst, cap, "%s-%s", ROOM_ID, DEVICE_ID);
+}
+
+// Connects using the last-saved network, falling back to a captive-portal
+// hotspot ("<ROOM_ID>-<DEVICE_ID>") whenever there's nothing saved yet or
+// the saved credentials no longer work. Once associated, taskPortal keeps that
+// same hotspot up so the network can be changed without a re-flash. Holding the
+// pot fully down through power-on wipes the saved network outright, which is
+// the way back in if the portal itself is ever unreachable.
 static void connectToWiFi() {
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(WIFI_PS_NONE);          // modem sleep adds tens of ms of jitter
+    WiFi.setSleep(WIFI_PS_NONE);   // modem sleep adds tens of ms of jitter
+
+    wm.setConfigPortalTimeout(180);   // give up and reboot rather than hang forever
+    wm.setAPCallback([](WiFiManager*) {
+        if (WiFi.status() != WL_CONNECTED) link_state = LINK_SETUP;
+    });
+
+    if (readPot() < 0.02f) {
+        Serial.println("Pot held down at boot — clearing saved WiFi");
+        wm.resetSettings();
+    }
+
+    char ap_name[40];
+    setupApName(ap_name, sizeof(ap_name));
+
+    // A box with a saved network is connecting, not waiting to be set up, so it
+    // never shows the slow "needs setup" pace unless that network fails and
+    // autoConnect falls back to the portal.
+    if (wm.getWiFiIsSaved()) link_state = LINK_CONNECTING;
+
+    Serial.printf("Connecting to WiFi (portal \"%s\" if nothing saved)\n", ap_name);
+    if (!wm.autoConnect(ap_name)) {
+        Serial.println("WiFi setup timed out — restarting");
+        ESP.restart();
+    }
+
     WiFi.setAutoReconnect(true);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    link_state = LINK_NO_RELAY;   // taskLink refines this once it is running
+    Serial.printf("WiFi connected, ip=%s rssi=%d\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-    Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
-    uint32_t started = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - started < 30000) {
-        Serial.print(".");
-        delay(500);
-    }
-    Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("WiFi connected, ip=%s rssi=%d\n",
-                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    } else {
-        // Not fatal — taskLink keeps retrying in the background.
-        Serial.println("WiFi not connected yet — will keep retrying");
-    }
+    // From here on taskPortal owns the portal, and it must never block the
+    // audio tasks waiting for a browser that may never arrive.
+    wm.setConfigPortalBlocking(false);
+    wm.setConfigPortalTimeout(0);      // lifetime is driven by link state instead
 }
 
 // Resolves RELAY_HOST; accepts either a literal IP or a DNS name.
@@ -550,8 +598,8 @@ static void taskSpeaker(void*) {
 // Local pot sets our own speaker volume and is mirrored to the peer's LEDs.
 static void taskPotTx(void*) {
     for (;;) {
-        float pot_norm = 1.0f - (analogRead(POT_PIN) / 4095.0f);
-        pot_norm = constrain(pot_norm, 0.0f, 1.0f);
+        float pot_norm = readPot();
+        local_pot = pot_norm;
 
         volume.setVolume(pot_norm * 5.0f);
 
@@ -565,20 +613,70 @@ static void taskPotTx(void*) {
 // LEDs show the peer's pot while the call is up, and the link state otherwise,
 // so a failure 2000 miles away is still visible from the handset itself.
 static void taskLeds(void*) {
-    uint8_t breathe = 0;
+    uint8_t breathe     = 0;
+    uint8_t pulse_depth = 0;   // 0 = steady, 255 = full swing down to black
+
     for (;;) {
+        // Free-running, so changing pace slides rather than jumping.  The slow
+        // pace means "unconfigured"; speeding up is the first visible sign that
+        // credentials took and the box is working on the connection.
+        breathe += (link_state == LINK_SETUP) ? PULSE_RATE_SETUP : PULSE_RATE;
+
         if (link_state == LINK_UP) {
-            fill_solid(leds, NUM_LEDS, CHSV(24, 200, (uint8_t)(remote_pot * 255)));
+            // Pulse only while they are audible to us and we are not to them.
+            bool want_pulse = (remote_pot > POT_QUIET_LEVEL) && (local_pot < POT_QUIET_LEVEL);
+            pulse_depth = want_pulse ? qadd8(pulse_depth, PULSE_RAMP_STEP)
+                                     : qsub8(pulse_depth, PULSE_RAMP_STEP);
+
+            // Remote pot still sets the ceiling; the pulse swings below it.
+            uint8_t peak   = (uint8_t)(remote_pot * 255);
+            uint8_t factor = 255 - scale8(pulse_depth, 255 - sin8(breathe));
+            fill_solid(leds, NUM_LEDS, CHSV(24, 200, scale8(peak, factor)));
         } else {
-            breathe += 4;
-            uint8_t value = scale8(sin8(breathe), 60);   // dim, slow pulse
-            uint8_t hue   = (link_state == LINK_WIFI_DOWN) ? 0     // red:   no WiFi
-                          : (link_state == LINK_NO_RELAY)  ? 32    // amber: no relay
-                                                           : 160;  // blue:  no peer
-            fill_solid(leds, NUM_LEDS, CHSV(hue, 200, value));
+            // One dim pulse, recolored per state.  White lights all three
+            // channels, so it reads far brighter than a saturated hue at the
+            // same value and gets its own cap to keep the states one family.
+            uint8_t hue = 160, sat = 200, cap = 60;   // blue: needs setup, or peer offline
+            switch (link_state) {
+            case LINK_WIFI_DOWN:  hue = 0;            break;   // red:   no WiFi
+            case LINK_CONNECTING: sat = 0;  cap = 40; break;   // white: joining the network
+            case LINK_NO_RELAY:   hue = 96;           break;   // green: waiting on the relay
+            default:                                  break;
+            }
+            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(sin8(breathe), cap)));
         }
         FastLED.show();
         vTaskDelay(pdMS_TO_TICKS(LED_PERIOD_MS));
+    }
+}
+
+// Keeps the setup portal reachable whenever a call is not up, so switching the
+// box to a new network never needs a re-flash.
+//
+// The portal is torn down for the duration of a call: the AP and the station
+// share one radio, and beacons plus probe responses inject exactly the kind of
+// jitter that WIFI_PS_NONE above exists to avoid.
+//
+// It is also only ever started while the station is associated. WiFiManager
+// disables STA when bringing the AP up on an unassociated radio (a hanging
+// connect starves the softAP), which would fight taskLink's reconnect and leave
+// the box stranded after something as ordinary as a router reboot.
+static void taskPortal(void*) {
+    for (;;) {
+        bool want_portal = (WiFi.status() == WL_CONNECTED) && (link_state != LINK_UP);
+
+        if (want_portal && !wm.getConfigPortalActive()) {
+            char ap_name[40];
+            setupApName(ap_name, sizeof(ap_name));
+            Serial.printf("Setup portal open: \"%s\"\n", ap_name);
+            wm.startConfigPortal(ap_name);
+        } else if (!want_portal && wm.getConfigPortalActive()) {
+            Serial.println("Setup portal closed");
+            wm.stopConfigPortal();
+        }
+
+        if (wm.getConfigPortalActive()) wm.process();
+        vTaskDelay(pdMS_TO_TICKS(PORTAL_PERIOD_MS));
     }
 }
 
@@ -588,6 +686,7 @@ static void taskLink(void*) {
     bool     was_connected  = false;
     uint16_t register_seq   = 0;
     uint32_t last_wifi_kick = 0;
+    uint32_t down_since     = 0;   // 0 = currently associated
 
     for (;;) {
         if (WiFi.status() != WL_CONNECTED) {
@@ -595,7 +694,9 @@ static void taskLink(void*) {
                 Serial.println("WiFi lost — reconnecting");
                 was_connected = false;
             }
-            link_state     = LINK_WIFI_DOWN;
+            if (!down_since) down_since = millis();
+            link_state     = (millis() - down_since < WIFI_GRACE_MS) ? LINK_CONNECTING
+                                                                    : LINK_WIFI_DOWN;
             relay_ip_valid = false;
 
             // Let the driver's own auto-reconnect work; only force a fresh
@@ -603,13 +704,14 @@ static void taskLink(void*) {
             // restarting it too eagerly would never let it finish.
             if (millis() - last_wifi_kick > WIFI_RETRY_MS) {
                 last_wifi_kick = millis();
-                Serial.printf("Retrying WiFi \"%s\"\n", WIFI_SSID);
-                WiFi.disconnect();
-                WiFi.begin(WIFI_SSID, WIFI_PASS);
+                Serial.println("Retrying WiFi");
+                WiFi.reconnect();   // reuses creds WiFiManager already saved to NVS
             }
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
+
+        down_since = 0;
 
         if (!was_connected) {
             Serial.printf("WiFi up, ip=%s\n", WiFi.localIP().toString().c_str());
@@ -645,6 +747,8 @@ static void taskLink(void*) {
 #if ENABLE_DIAGNOSTICS
 static const char* linkStateName(LinkState state) {
     switch (state) {
+    case LINK_SETUP:        return "setup";
+    case LINK_CONNECTING:   return "connecting";
     case LINK_WIFI_DOWN:    return "wifi-down";
     case LINK_NO_RELAY:     return "no-relay";
     case LINK_WAITING_PEER: return "waiting-peer";
@@ -692,6 +796,11 @@ void setup() {
     setupMic();
     setupSpeaker();
 
+    // Started before connectToWiFi: that call blocks in the setup portal until
+    // someone configures the box, and an unlit strip is indistinguishable from
+    // a dead one.
+    xTaskCreatePinnedToCore(taskLeds,    "leds",    4096, NULL, 1, NULL, 0);
+
     connectToWiFi();
     udp.begin(LOCAL_PORT);
     resolveRelay();
@@ -704,7 +813,7 @@ void setup() {
     // Core 0: control path, shares the core with the WiFi stack.
     xTaskCreatePinnedToCore(taskLink,    "link",    8192, NULL, 2, NULL, 0);
     xTaskCreatePinnedToCore(taskPotTx,   "pot tx",  4096, NULL, 2, NULL, 0);
-    xTaskCreatePinnedToCore(taskLeds,    "leds",    4096, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(taskPortal,  "portal",  8192, NULL, 1, NULL, 0);
 #if ENABLE_DIAGNOSTICS
     xTaskCreatePinnedToCore(taskStats,   "stats",   4096, NULL, 1, NULL, 0);
 #endif
