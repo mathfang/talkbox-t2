@@ -68,7 +68,6 @@ static const int LED_PERIOD_MS = 33;    // ~30 Hz LED refresh
 static const float   POT_QUIET_LEVEL   = 0.10f;   // 10% of pot travel
 static const uint8_t PULSE_RAMP_STEP   = 8;       // depth per frame; ~1 s full fade
 static const uint8_t PULSE_RATE        = 4;       // phase per frame; ~2 s period
-static const uint8_t PULSE_RATE_SETUP  = 2;       // half pace; ~4 s "come configure me"
 static const int PORTAL_PERIOD_MS = 20;   // portal HTTP/DNS service interval
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -899,10 +898,7 @@ static void taskLeds(void*) {
     uint8_t pulse_depth = 0;   // 0 = steady, 255 = full swing down to black
 
     for (;;) {
-        // Free-running, so changing pace slides rather than jumping.  The slow
-        // pace means "unconfigured"; speeding up is the first visible sign that
-        // credentials took and the box is working on the connection.
-        breathe += (link_state == LINK_SETUP) ? PULSE_RATE_SETUP : PULSE_RATE;
+        breathe += PULSE_RATE;   // free-running, so state changes never jump phase
 
         if (link_state == LINK_UP) {
             // Pulse only while they are audible to us and we are not to them.
