@@ -200,18 +200,21 @@ static const uint32_t PROBE_NO_DELAY = 0xFFFFFFFFul;
 // Read off the aligned stats instead, taking only lines where the far end is
 // clearly talking and the near end is not, coupling is about 0.25.
 //
-// Which makes 5.0 a real ceiling rather than a nominal one.  At full pot the
-// loop multiplies by 1.25 per hop and 1.56 round trip, and oscillates.  At
-// the 20% position, where pot x MAX_VOLUME works out to a volume factor of
-// exactly 1.0, it is 0.25 per hop and 0.06 round trip — 24 dB below unity,
-// far too quiet to ring, which is why what rings there is the enclosure
-// resonance alone rather than the loop as a whole.
+// Which makes 5.0 a real ceiling rather than a nominal one — or it did.
+// Coupling is not a property of this box alone, because what we play has
+// already been through the far end's filter chain on the way here, and the
+// frequencies it removes are the ones this box couples best at.  Measured
+// again with both handsets filtering, mic over spk runs 0.07 to 0.20 against
+// the 0.25 above: a notch at each end roughly halves the echo at the other.
 //
-// Left at 5.0 because the knob belongs to whoever is holding the handset, but
-// usable travel currently ends somewhere near the middle, and a canceller is
-// what buys the rest of it back.  Worth knowing that VolumeStream clips at
-// +/-32767, so a boost this large hard-clips loud passages, and clipping is
-// the main thing limiting how much of the echo a linear canceller can remove.
+// At 0.12 the loop multiplies by 0.6 per hop at full pot and 0.36 round trip,
+// which is stable.  The whole knob is usable now, give or take the last of
+// the travel, where a worst-case 0.20 puts the round trip back near unity.
+// Left at 5.0, which is finally a number that means something.
+//
+// Worth knowing that VolumeStream clips at +/-32767, so a boost this large
+// hard-clips loud passages, and clipping is the main thing limiting how much
+// of the echo a linear canceller can remove.
 static const float MAX_VOLUME = 5.0f;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,9 +246,15 @@ static const float MAX_VOLUME = 5.0f;
 // reach the same depth would have flattened every consonant above it.
 //
 // Both stages stay.  The shelf handles whatever else lives up top, the notch
-// handles the one that matters.  If the ring moves rather than stops — kill
-// one resonance and the next one down can take over — hz= will name the new
-// frequency and a third stage goes in exactly the same way.
+// handles the one that matters.  Confirmed on the handsets: the hum no
+// longer outlasts the sound that started it, and hz= has stopped returning a
+// repeated number — the readings now scatter from 468 to 2093 Hz, which is
+// what a box with no one dominant resonance looks like.
+//
+// If a ring ever comes back rather than staying gone — kill one resonance and
+// the next one down can take over — hz= will name the new frequency and a
+// third stage goes in exactly the same way.  The readings loosely grouped
+// around 1100 to 1400 Hz are the ones to watch.
 //
 // Applied to what we transmit rather than what we play.  The loop passes
 // through here either way, and this way our own playback stays full range.
