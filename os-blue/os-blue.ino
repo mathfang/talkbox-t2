@@ -171,12 +171,15 @@ static const uint32_t PROBE_WINDOW = 512;
 static const float PROBE_FAR_ACTIVE = 30.0f;
 
 // How well the two envelopes have to line up before the answer is worth
-// printing.  The correlation at the winning lag is not just a nicety here — it
-// is what separates a real measurement from an argmax over noise.  Simulated
-// against a synthetic call: with this hardware's coupling (0.84 to 1.87) every
-// window lands on the right lag at r = 0.75 to 0.83 even against a talker
-// louder than the echo, while a case weak enough to lose the peak wanders all
-// over the range and drops below 0.30 whenever it does.  0.40 sits in the gap.
+// printing.  The correlation at the winning lag is not a nicety here — it is
+// what separates a real measurement from an argmax over noise.
+//
+// Simulated first: a case weak enough to lose the peak wanders the whole
+// range and drops below 0.30 whenever it does, while a findable one sits at
+// 0.75 and up.  Confirmed since on the handsets, where 30 s of one-way speech
+// held delay=48ms across every window that cleared this bar, at r running 45
+// to 86%, and reported "weak" at 27 to 36% exactly when both ends were
+// talking at once.  0.40 sits in the gap.
 //
 // Below it the delay is withheld rather than guessed at, because a plausible
 // wrong number read off a log is worse than no number.
@@ -188,18 +191,67 @@ static const uint32_t PROBE_NO_DELAY = 0xFFFFFFFFul;
 // Ceiling on the pot's volume boost.
 //
 // Per hop the loop multiplies by (coupling x volume), where coupling is the
-// mic level over the speaker samples that provoked it.  Measured on this
-// hardware it runs 0.84 to 1.87 — the mic picks the speaker up LOUDER than
-// what is sent to it — so at 5.0 the round trip sits roughly 35 dB above
-// unity, and a single table knock builds into a howl.
+// mic level over the speaker samples that provoked it.
 //
-// Left at 5.0 anyway.  The loudness is worth more than the stability, and a
-// canceller subtracts the echo instead of ducking it: ~20 dB of cancellation
-// plus a light residual suppressor covers that gap without handing the volume
-// back.  Worth knowing that VolumeStream clips at +/-32767, so this much boost
-// also hard-clips loud passages, and clipping is the main thing limiting how
-// much of the echo a linear canceller can remove.
+// An earlier note here put that coupling at 0.84 to 1.87, inherited from the
+// parked suppressor's runtime estimate.  That figure was peak mic over peak
+// playback across the same one-second window, so every word the near end
+// spoke landed in the numerator — it was measuring the talker, not the room.
+// Read off the aligned stats instead, taking only lines where the far end is
+// clearly talking and the near end is not, coupling is about 0.25.
+//
+// Which makes 5.0 a real ceiling rather than a nominal one.  At full pot the
+// loop multiplies by 1.25 per hop and 1.56 round trip, and oscillates.  At
+// the 20% position, where pot x MAX_VOLUME works out to a volume factor of
+// exactly 1.0, it is 0.25 per hop and 0.06 round trip — 24 dB below unity,
+// far too quiet to ring, which is why what rings there is the enclosure
+// resonance alone rather than the loop as a whole.
+//
+// Left at 5.0 because the knob belongs to whoever is holding the handset, but
+// usable travel currently ends somewhere near the middle, and a canceller is
+// what buys the rest of it back.  Worth knowing that VolumeStream clips at
+// +/-32767, so a boost this large hard-clips loud passages, and clipping is
+// the main thing limiting how much of the echo a linear canceller can remove.
 static const float MAX_VOLUME = 5.0f;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mic high-shelf
+//
+// Feedback does not howl across a band, it howls at the one frequency where
+// the loop gain peaks, and everything here conspires to put that peak high:
+// a small sealed cavity resonates in the low kHz, small speakers and MEMS
+// mics both rise toward the top of their range, and the pot's boost is flat
+// so it lifts the peak along with everything else.
+//
+// The broadband arithmetic above says this loop should be silent at the pot
+// position where the ringing was recorded.  That it rings anyway puts the
+// resonance at least 12 dB above the broadband average, which is ordinary
+// for a box like this.  So the fix is narrowband: take the top of the band
+// down and the peak goes under unity with it.
+//
+// Speech intelligibility lives almost entirely below 3.5 kHz, so this costs
+// brightness and a little consonant crispness and nothing else.  It is what a
+// sound engineer does when they ring out a room, minus the guesswork about
+// which frequency — "hz=" in the stats line answers that.
+//
+// A shelf rather than a notch because a notch has to be aimed, and the
+// frequency is not known yet.  Once hz= names one, a notch there would take
+// less of the voice with it than this does.
+//
+// Applied to what we transmit rather than what we play.  The loop passes
+// through here either way, and this way our own playback stays full range.
+// ─────────────────────────────────────────────────────────────────────────────
+#define ENABLE_MIC_SHELF 1
+
+// The two knobs.  -12 dB above 3 kHz takes roughly as much out of the loop as
+// raising the pot from 20% to full puts back in.
+static const float MIC_SHELF_HZ = 3000.0f;
+static const float MIC_SHELF_DB = -12.0f;
+
+// Below this the loudest block in an interval is too quiet for its
+// zero-crossing rate to mean anything, and hz= reports nothing rather than a
+// number made of room tone.
+static const float MIC_HZ_FLOOR = 30.0f;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire protocol (shared with relay.py — keep the two in sync)
@@ -303,6 +355,7 @@ static volatile uint32_t stat_overruns   = 0;
 // 2 s would miss both.
 static volatile float stat_echo_spk = 0.0f;   // loudest block we played
 static volatile float stat_echo_mic = 0.0f;   // loudest block the mic heard
+static volatile float stat_mic_hz   = 0.0f;   // ... and its dominant frequency
 
 // Latest output of the delay probe.  Written by taskMicTx once per window,
 // read by taskStats; probe_blocks stays 0 until the first window completes,
@@ -464,7 +517,6 @@ static void probeNotePlayed(const uint8_t* data, size_t len) {
 // Called once per captured block.  Reads the mic, never writes it.
 static void probeNoteCaptured(const uint8_t* data, size_t len) {
     const float level = blockLevel(data, len);
-    if (level > stat_echo_mic) stat_echo_mic = level;
 
     // One read of the writer's index, so the scan below sees a view that is at
     // worst one block stale rather than one that slides underneath it.
@@ -541,6 +593,122 @@ static void probeNoteCaptured(const uint8_t* data, size_t len) {
 
 static inline void probeNotePlayed(const uint8_t*, size_t) {}
 static inline void probeNoteCaptured(const uint8_t*, size_t) {}
+
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mic front end.  micAnalyse() measures the raw mic and never changes it;
+// micShelf() changes it and never measures it.
+// ─────────────────────────────────────────────────────────────────────────────
+// Level and dominant frequency of the loudest block in the interval.
+//
+// Zero-crossing rate is a crude pitch estimate on speech, where it reads more
+// like brightness than pitch.  On a ring it is exactly right: a loop
+// oscillating at its resonance is very nearly a sine wave, and a sine wave
+// crosses its own centre line twice per cycle.  Since it is only ever
+// reported for the loudest block of an interval, and a ring is by some margin
+// the loudest thing in the box, the number that comes out during ringing is
+// the ringing frequency.
+//
+// Crossings are counted against the block's own mean rather than against
+// zero.  A MEMS mic can sit on a DC offset larger than the signal riding on
+// it, and crossings of zero would then count nothing at all.
+static void micAnalyse(const uint8_t* data, size_t len) {
+    const int16_t* s = (const int16_t*)data;
+    const size_t   n = len / 2;
+    if (n < 2) return;
+
+    int32_t sum     = 0;   // signed, for the DC the mic is sitting on
+    int32_t sum_abs = 0;   // unsigned, for the level
+    for (size_t i = 0; i < n; i++) {
+        const int32_t v = s[i];
+        sum     += v;
+        sum_abs += (v < 0) ? -v : v;
+    }
+
+    const float level = (float)sum_abs / (float)n;
+    if (level <= stat_echo_mic) return;   // a louder block already spoke for this interval
+    stat_echo_mic = level;
+
+    // Peaks only ever climb within an interval, so a new peak below the floor
+    // means nothing louder has happened yet and there is no frequency to
+    // report.  Clearing rather than leaving the old one keeps hz= honest.
+    if (level < MIC_HZ_FLOOR) {
+        stat_mic_hz = 0.0f;
+        return;
+    }
+
+    const int32_t dc = sum / (int32_t)n;
+    uint32_t crossings = 0;
+    bool     prev      = (s[0] > dc);
+    for (size_t i = 1; i < n; i++) {
+        const bool cur = (s[i] > dc);
+        if (cur != prev) crossings++;
+        prev = cur;
+    }
+
+    stat_mic_hz = (float)crossings * (float)SAMPLE_RATE / (2.0f * (float)n);
+}
+
+#if ENABLE_MIC_SHELF
+
+// Direct form I biquad.  Coefficients from the RBJ audio EQ cookbook's
+// high-shelf, with the shelf slope S fixed at 1, which is the gentlest
+// transition that does not overshoot.
+static float shelf_b0 = 1.0f, shelf_b1 = 0.0f, shelf_b2 = 0.0f;
+static float shelf_a1 = 0.0f, shelf_a2 = 0.0f;
+static float shelf_x1 = 0.0f, shelf_x2 = 0.0f;
+static float shelf_y1 = 0.0f, shelf_y2 = 0.0f;
+
+static void micShelfBegin() {
+    const float A     = powf(10.0f, MIC_SHELF_DB / 40.0f);
+    const float w0    = 2.0f * PI * MIC_SHELF_HZ / (float)SAMPLE_RATE;
+    const float cosw  = cosf(w0);
+    const float alpha = sinf(w0) * 0.70710678f;    // sin(w0)/2 * sqrt(2), i.e. S = 1
+    const float tsa   = 2.0f * sqrtf(A) * alpha;
+    const float ap1   = A + 1.0f;
+    const float am1   = A - 1.0f;
+
+    const float b0 =         A * (ap1 + am1 * cosw + tsa);
+    const float b1 = -2.0f * A * (am1 + ap1 * cosw);
+    const float b2 =         A * (ap1 + am1 * cosw - tsa);
+    const float a0 =              ap1 - am1 * cosw + tsa;
+    const float a1 =  2.0f *     (am1 - ap1 * cosw);
+    const float a2 =              ap1 - am1 * cosw - tsa;
+
+    shelf_b0 = b0 / a0;
+    shelf_b1 = b1 / a0;
+    shelf_b2 = b2 / a0;
+    shelf_a1 = a1 / a0;
+    shelf_a2 = a2 / a0;
+
+    Serial.printf("Mic shelf: %.0f dB above %.0f Hz\n", MIC_SHELF_DB, MIC_SHELF_HZ);
+}
+
+static void micShelf(uint8_t* data, size_t len) {
+    int16_t*     s = (int16_t*)data;
+    const size_t n = len / 2;
+
+    for (size_t i = 0; i < n; i++) {
+        const float x = (float)s[i];
+        const float y = shelf_b0 * x
+                      + shelf_b1 * shelf_x1 + shelf_b2 * shelf_x2
+                      - shelf_a1 * shelf_y1 - shelf_a2 * shelf_y2;
+
+        // State keeps the unclamped value.  Feeding a clipped sample back into
+        // a recursive filter is how one loud moment turns into a permanent
+        // rattle; the clamp belongs on the way out and nowhere else.
+        shelf_x2 = shelf_x1; shelf_x1 = x;
+        shelf_y2 = shelf_y1; shelf_y1 = y;
+
+        s[i] = (int16_t)((y > 32767.0f) ? 32767.0f : ((y < -32768.0f) ? -32768.0f : y));
+    }
+}
+
+#else   // ENABLE_MIC_SHELF
+
+static inline void micShelfBegin() {}
+static inline void micShelf(uint8_t*, size_t) {}
 
 #endif
 
@@ -684,6 +852,7 @@ static void setupMic() {
     cfg_in.buffer_size     = I2S_DMA_CHUNK_BYTES;
     cfg_in.buffer_count    = I2S_DMA_CHUNKS;
     in.begin(cfg_in);
+    micShelfBegin();
     Serial.println("Mic is running");
 }
 
@@ -724,9 +893,17 @@ static void taskMicTx(void*) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        // Runs even with the link down.  Nothing is playing then, so the probe
-        // skips those blocks itself rather than being told to.
+        // Order matters.  Both diagnostics read the raw mic so that what they
+        // report describes the box rather than our own filtering, and the
+        // shelf goes last so only the wire sees it.  A canceller belongs
+        // between the probe and the shelf, where the echo path it has to
+        // model is still the untouched one.
+        //
+        // All of this runs even with the link down.  Nothing is playing then,
+        // so the probe skips those blocks itself rather than being told to.
+        micAnalyse(tx_buffer, n);
         probeNoteCaptured(tx_buffer, n);
+        micShelf(tx_buffer, n);
         if (link_state == LINK_UP) {
             if (!sendToRelay(TB_AUDIO, tx_audio_seq++, tx_buffer, n)) stat_tx_fail++;
         }
@@ -1048,6 +1225,7 @@ static void taskStats(void*) {
         uint32_t over  = stat_overruns;   stat_overruns   = 0;
         float    espk  = stat_echo_spk;   stat_echo_spk   = 0.0f;
         float    emic  = stat_echo_mic;   stat_echo_mic   = 0.0f;
+        float    mhz   = stat_mic_hz;     stat_mic_hz     = 0.0f;
         uint32_t trim  = stat_trims;      stat_trims      = 0;
         uint32_t txf   = stat_tx_fail;    stat_tx_fail    = 0;
 
@@ -1055,6 +1233,14 @@ static void taskStats(void*) {
         // estimate is reported four times over.  Left that way on purpose: a
         // reading that holds still across repeats is a reading you can trust,
         // and one that jumps around is telling you the correlation is weak.
+        // Dominant frequency of the loudest mic block.  During a ring this is
+        // the ring; during speech it reads as brightness.  Aim MIC_SHELF_HZ
+        // with it: what matters is where it settles while the box is howling,
+        // not what it does while someone is talking.
+        char hz_str[16];
+        if (mhz > 0.0f) snprintf(hz_str, sizeof(hz_str), "%luHz", (unsigned long)mhz);
+        else            snprintf(hz_str, sizeof(hz_str), "-");
+
         char delay_str[40];
 #if ENABLE_DELAY_PROBE
         if (!probe_blocks) {
@@ -1076,7 +1262,7 @@ static void taskStats(void*) {
         Serial.printf(
             "[link=%s rssi=%d] tx=%lu B/s rx=%lu B/s | jitter=%lu ms trim=%lu "
             "lost=%lu late=%lu under=%lu over=%lu txfail=%lu | "
-            "echo spk=%lu mic=%lu delay=%s | heap=%lu\n",
+            "echo spk=%lu mic=%lu hz=%s delay=%s | heap=%lu\n",
             linkStateName(link_state), WiFi.RSSI(),
             (unsigned long)(tx * 1000 / period_ms),
             (unsigned long)(rx * 1000 / period_ms),
@@ -1085,7 +1271,7 @@ static void taskStats(void*) {
             (unsigned long)lost, (unsigned long)late,
             (unsigned long)under, (unsigned long)over, (unsigned long)txf,
             (unsigned long)espk, (unsigned long)emic,
-            delay_str,
+            hz_str, delay_str,
             (unsigned long)ESP.getFreeHeap());
     }
 }
