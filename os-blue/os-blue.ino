@@ -215,7 +215,7 @@ static const uint32_t PROBE_NO_DELAY = 0xFFFFFFFFul;
 static const float MAX_VOLUME = 5.0f;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mic high-shelf
+// Mic filter chain
 //
 // Feedback does not howl across a band, it howls at the one frequency where
 // the loop gain peaks, and everything here conspires to put that peak high:
@@ -223,30 +223,46 @@ static const float MAX_VOLUME = 5.0f;
 // mics both rise toward the top of their range, and the pot's boost is flat
 // so it lifts the peak along with everything else.
 //
-// The broadband arithmetic above says this loop should be silent at the pot
-// position where the ringing was recorded.  That it rings anyway puts the
-// resonance at least 12 dB above the broadband average, which is ordinary
-// for a box like this.  So the fix is narrowband: take the top of the band
-// down and the peak goes under unity with it.
+// The broadband arithmetic on MAX_VOLUME above says this loop should be
+// silent at the pot position where the ringing was recorded.  That it rings
+// anyway puts the resonance well above the broadband average, which is
+// ordinary for a box like this.  So the fix is narrowband, not broadband.
 //
-// Speech intelligibility lives almost entirely below 3.5 kHz, so this costs
-// brightness and a little consonant crispness and nothing else.  It is what a
-// sound engineer does when they ring out a room, minus the guesswork about
-// which frequency — "hz=" in the stats line answers that.
+// The shelf came first, aimed at a guess of 3 kHz, and it took most of the
+// ringing out.  Then hz= named the actual resonance and it is nowhere near
+// 3 kHz: across every logged interval where playback was loud and the mic
+// was hearing it back, the reading landed between 1781 and 2031 Hz — eleven
+// of them, clustered on 1900.  (The scattered 187 to 750 Hz readings in the
+// same log are the near end talking.  Voiced speech has a low crossing rate,
+// so a low reading means a voice and a repeated one means a resonance.)
 //
-// A shelf rather than a notch because a notch has to be aimed, and the
-// frequency is not known yet.  Once hz= names one, a notch there would take
-// less of the voice with it than this does.
+// Which means the shelf was only ever clipping that resonance's harmonics.
+// Enough to take the edge off, not enough to stop it.  A notch aimed at 1900
+// finishes the job and costs almost nothing: at Q = 4 it touches roughly 475
+// Hz of the spectrum, where dragging the shelf corner down to 1.3 kHz to
+// reach the same depth would have flattened every consonant above it.
+//
+// Both stages stay.  The shelf handles whatever else lives up top, the notch
+// handles the one that matters.  If the ring moves rather than stops — kill
+// one resonance and the next one down can take over — hz= will name the new
+// frequency and a third stage goes in exactly the same way.
 //
 // Applied to what we transmit rather than what we play.  The loop passes
 // through here either way, and this way our own playback stays full range.
 // ─────────────────────────────────────────────────────────────────────────────
-#define ENABLE_MIC_SHELF 1
+#define ENABLE_MIC_FILTER 1
 
-// The two knobs.  -12 dB above 3 kHz takes roughly as much out of the loop as
-// raising the pot from 20% to full puts back in.
+// Stage 1, the blunt one: everything above the corner comes down by this much.
 static const float MIC_SHELF_HZ = 3000.0f;
 static const float MIC_SHELF_DB = -12.0f;
+
+// Stage 2, the aimed one.  Q sets how wide the bucket is — bandwidth at the
+// half-power points is roughly MIC_NOTCH_HZ / MIC_NOTCH_Q, so 475 Hz here.
+// Widen it (lower Q) if the ring wanders, deepen it (more dB) if it holds
+// still and persists.
+static const float MIC_NOTCH_HZ = 1900.0f;
+static const float MIC_NOTCH_DB = -18.0f;
+static const float MIC_NOTCH_Q  = 4.0f;
 
 // Below this the loudest block in an interval is too quiet for its
 // zero-crossing rate to mean anything, and hz= reports nothing rather than a
@@ -598,7 +614,7 @@ static inline void probeNoteCaptured(const uint8_t*, size_t) {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mic front end.  micAnalyse() measures the raw mic and never changes it;
-// micShelf() changes it and never measures it.
+// micFilter() changes it and never measures it.
 // ─────────────────────────────────────────────────────────────────────────────
 // Level and dominant frequency of the loudest block in the interval.
 //
@@ -650,65 +666,87 @@ static void micAnalyse(const uint8_t* data, size_t len) {
     stat_mic_hz = (float)crossings * (float)SAMPLE_RATE / (2.0f * (float)n);
 }
 
-#if ENABLE_MIC_SHELF
+#if ENABLE_MIC_FILTER
 
-// Direct form I biquad.  Coefficients from the RBJ audio EQ cookbook's
-// high-shelf, with the shelf slope S fixed at 1, which is the gentlest
-// transition that does not overshoot.
-static float shelf_b0 = 1.0f, shelf_b1 = 0.0f, shelf_b2 = 0.0f;
-static float shelf_a1 = 0.0f, shelf_a2 = 0.0f;
-static float shelf_x1 = 0.0f, shelf_x2 = 0.0f;
-static float shelf_y1 = 0.0f, shelf_y2 = 0.0f;
+// One second-order section, direct form I, with the two designers we need.
+// Coefficients follow the RBJ audio EQ cookbook.
+struct Biquad {
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+    float x1 = 0.0f, x2 = 0.0f, y1 = 0.0f, y2 = 0.0f;
 
-static void micShelfBegin() {
-    const float A     = powf(10.0f, MIC_SHELF_DB / 40.0f);
-    const float w0    = 2.0f * PI * MIC_SHELF_HZ / (float)SAMPLE_RATE;
-    const float cosw  = cosf(w0);
-    const float alpha = sinf(w0) * 0.70710678f;    // sin(w0)/2 * sqrt(2), i.e. S = 1
-    const float tsa   = 2.0f * sqrtf(A) * alpha;
-    const float ap1   = A + 1.0f;
-    const float am1   = A - 1.0f;
+    void normalise(float nb0, float nb1, float nb2, float a0, float na1, float na2) {
+        b0 = nb0 / a0; b1 = nb1 / a0; b2 = nb2 / a0;
+        a1 = na1 / a0; a2 = na2 / a0;
+    }
 
-    const float b0 =         A * (ap1 + am1 * cosw + tsa);
-    const float b1 = -2.0f * A * (am1 + ap1 * cosw);
-    const float b2 =         A * (ap1 + am1 * cosw - tsa);
-    const float a0 =              ap1 - am1 * cosw + tsa;
-    const float a1 =  2.0f *     (am1 - ap1 * cosw);
-    const float a2 =              ap1 - am1 * cosw - tsa;
+    // Everything above f0 down by db, everything below it untouched.
+    void highShelf(float f0, float db, float fs) {
+        const float A     = powf(10.0f, db / 40.0f);
+        const float w0    = 2.0f * PI * f0 / fs;
+        const float cosw  = cosf(w0);
+        const float alpha = sinf(w0) * 0.70710678f;   // shelf slope S = 1
+        const float tsa   = 2.0f * sqrtf(A) * alpha;
+        const float ap1   = A + 1.0f;
+        const float am1   = A - 1.0f;
+        normalise(        A * (ap1 + am1 * cosw + tsa),
+                  -2.0f * A * (am1 + ap1 * cosw),
+                           A * (ap1 + am1 * cosw - tsa),
+                                ap1 - am1 * cosw + tsa,
+                   2.0f *      (am1 - ap1 * cosw),
+                                ap1 - am1 * cosw - tsa);
+    }
 
-    shelf_b0 = b0 / a0;
-    shelf_b1 = b1 / a0;
-    shelf_b2 = b2 / a0;
-    shelf_a1 = a1 / a0;
-    shelf_a2 = a2 / a0;
+    // A bucket of depth db centred on f0, width set by q.
+    void peaking(float f0, float db, float q, float fs) {
+        const float A     = powf(10.0f, db / 40.0f);
+        const float w0    = 2.0f * PI * f0 / fs;
+        const float cosw  = cosf(w0);
+        const float alpha = sinf(w0) / (2.0f * q);
+        normalise(1.0f + alpha * A,
+                  -2.0f * cosw,
+                  1.0f - alpha * A,
+                  1.0f + alpha / A,
+                  -2.0f * cosw,
+                  1.0f - alpha / A);
+    }
 
-    Serial.printf("Mic shelf: %.0f dB above %.0f Hz\n", MIC_SHELF_DB, MIC_SHELF_HZ);
+    inline float step(float x) {
+        const float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x;
+        y2 = y1; y1 = y;
+        return y;
+    }
+};
+
+static Biquad mic_stage[2];
+
+static void micFilterBegin() {
+    mic_stage[0].highShelf(MIC_SHELF_HZ, MIC_SHELF_DB, (float)SAMPLE_RATE);
+    mic_stage[1].peaking(MIC_NOTCH_HZ, MIC_NOTCH_DB, MIC_NOTCH_Q, (float)SAMPLE_RATE);
+    Serial.printf("Mic filter: %.0f dB above %.0f Hz, %.0f dB notch at %.0f Hz (Q %.1f)\n",
+                  MIC_SHELF_DB, MIC_SHELF_HZ, MIC_NOTCH_DB, MIC_NOTCH_HZ, MIC_NOTCH_Q);
 }
 
-static void micShelf(uint8_t* data, size_t len) {
+static void micFilter(uint8_t* data, size_t len) {
     int16_t*     s = (int16_t*)data;
     const size_t n = len / 2;
+    const size_t stages = sizeof(mic_stage) / sizeof(mic_stage[0]);
 
     for (size_t i = 0; i < n; i++) {
-        const float x = (float)s[i];
-        const float y = shelf_b0 * x
-                      + shelf_b1 * shelf_x1 + shelf_b2 * shelf_x2
-                      - shelf_a1 * shelf_y1 - shelf_a2 * shelf_y2;
+        float v = (float)s[i];
+        for (size_t k = 0; k < stages; k++) v = mic_stage[k].step(v);
 
-        // State keeps the unclamped value.  Feeding a clipped sample back into
-        // a recursive filter is how one loud moment turns into a permanent
-        // rattle; the clamp belongs on the way out and nowhere else.
-        shelf_x2 = shelf_x1; shelf_x1 = x;
-        shelf_y2 = shelf_y1; shelf_y1 = y;
-
-        s[i] = (int16_t)((y > 32767.0f) ? 32767.0f : ((y < -32768.0f) ? -32768.0f : y));
+        // Each stage keeps its own unclamped state.  Feeding a clipped sample
+        // back into a recursive filter is how one loud moment turns into a
+        // permanent rattle; the clamp belongs here, once, on the way out.
+        s[i] = (int16_t)((v > 32767.0f) ? 32767.0f : ((v < -32768.0f) ? -32768.0f : v));
     }
 }
 
-#else   // ENABLE_MIC_SHELF
+#else   // ENABLE_MIC_FILTER
 
-static inline void micShelfBegin() {}
-static inline void micShelf(uint8_t*, size_t) {}
+static inline void micFilterBegin() {}
+static inline void micFilter(uint8_t*, size_t) {}
 
 #endif
 
@@ -852,7 +890,7 @@ static void setupMic() {
     cfg_in.buffer_size     = I2S_DMA_CHUNK_BYTES;
     cfg_in.buffer_count    = I2S_DMA_CHUNKS;
     in.begin(cfg_in);
-    micShelfBegin();
+    micFilterBegin();
     Serial.println("Mic is running");
 }
 
@@ -895,15 +933,15 @@ static void taskMicTx(void*) {
         }
         // Order matters.  Both diagnostics read the raw mic so that what they
         // report describes the box rather than our own filtering, and the
-        // shelf goes last so only the wire sees it.  A canceller belongs
-        // between the probe and the shelf, where the echo path it has to
+        // filter goes last so only the wire sees it.  A canceller belongs
+        // between the probe and the filter, where the echo path it has to
         // model is still the untouched one.
         //
         // All of this runs even with the link down.  Nothing is playing then,
         // so the probe skips those blocks itself rather than being told to.
         micAnalyse(tx_buffer, n);
         probeNoteCaptured(tx_buffer, n);
-        micShelf(tx_buffer, n);
+        micFilter(tx_buffer, n);
         if (link_state == LINK_UP) {
             if (!sendToRelay(TB_AUDIO, tx_audio_seq++, tx_buffer, n)) stat_tx_fail++;
         }
@@ -1091,14 +1129,16 @@ static void taskLeds(void*) {
             // One dim pulse, recolored per state.  White lights all three
             // channels, so it reads far brighter than a saturated hue at the
             // same value and gets its own cap to keep the states one family.
-            uint8_t hue = 160, sat = 200, cap = 60;   // blue: needs setup, or peer offline
+            uint8_t hue = 160, sat = 200, cap = 60;   // blue: needs setup
+            uint8_t wave = sin8(breathe);
             switch (link_state) {
-            case LINK_WIFI_DOWN:  hue = 0;            break;   // red:   no WiFi
-            case LINK_CONNECTING: sat = 0;  cap = 40; break;   // white: joining the network
-            case LINK_NO_RELAY:   hue = 96;           break;   // green: waiting on the relay
-            default:                                  break;
+            case LINK_WIFI_DOWN:     hue = 0;            break;   // red:   no WiFi
+            case LINK_CONNECTING:    sat = 0;  cap = 40; break;   // white: joining the network
+            case LINK_NO_RELAY:      hue = 96;           break;   // green: waiting on the relay
+            case LINK_WAITING_PEER:  wave = 255;         break;   // blue, steady: peer offline
+            default:                                     break;
             }
-            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(sin8(breathe), cap)));
+            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(wave, cap)));
         }
         FastLED.show();
         vTaskDelay(pdMS_TO_TICKS(LED_PERIOD_MS));
