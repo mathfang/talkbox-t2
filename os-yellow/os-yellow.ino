@@ -279,6 +279,90 @@ static const float MIC_NOTCH_Q  = 4.0f;
 static const float MIC_HZ_FLOOR = 30.0f;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Echo canceller — stage 1, measuring only
+//
+// The suppressor this replaced turned the mic down when it thought it was
+// hearing itself.  A canceller does something different in kind: it knows
+// exactly what it sent to the speaker, so it predicts what the mic ought to
+// be hearing as a result and subtracts that.  Subtraction does not care how
+// loud the echo is, and it leaves your voice alone, because your voice was
+// never part of the prediction.  That is what buys back talking over someone.
+//
+// The prediction is a filter — AEC_TAPS weights over the reference — and the
+// weights are learned rather than typed in.  Each sample: predict, subtract,
+// and nudge the weights in whatever direction would have made the leftover
+// smaller.  Sixteen thousand nudges a second converges on this box in about a
+// second.
+//
+// AEC_APPLY is 0 here, so none of that reaches the wire yet.  This stage
+// exists to answer one question — is the reference we hand the filter really
+// the audio that caused the echo in this mic block — and it answers it with
+// erle=, which is how many dB of echo the filter managed to remove.  A filter
+// fed a misaligned reference learns nothing and reports 0.0 dB, so the number
+// is a plumbing test that cannot pass by accident.  Only once it reads
+// clearly positive is it worth putting in the audio path.
+//
+// (An earlier sketch of this stage had the filter do nothing at all.  That
+// would have reported 0.0 dB whether the plumbing was perfect or completely
+// broken, which is no test.)
+// ─────────────────────────────────────────────────────────────────────────────
+#define ENABLE_AEC  1
+#define AEC_APPLY   0    // stage 1: measure, never modify
+
+// Reference history.  Kept in samples rather than blocks because the filter
+// needs a run that crosses block boundaries, and sized to a power of two so
+// the wrap is a mask — which also makes the unsigned write counter wrap
+// correctly all by itself, 74 hours from now.
+static const size_t AEC_REF_SAMPLES = 8192;   // 512 ms
+static const size_t AEC_REF_MASK    = AEC_REF_SAMPLES - 1;
+
+// Where the filter's window starts and how long it is, together deciding
+// which echo delays it can cancel.  16 to 48 ms here, chosen to bracket the
+// 32-48 ms that delay= has been reporting with room on both sides: a little
+// ahead of the direct path, and more behind it, since the enclosure's
+// ringing arrives after the direct sound rather than before it.
+//
+// peak= in the stats line is how you check this.  It reports where in the
+// window the largest weight ended up.  Pinned near the start means the echo
+// begins before the window and AEC_DELAY_MS is too big; pinned near the end
+// means the window is too short or starts too early.  Somewhere in the middle
+// means it fits.
+static const uint32_t AEC_DELAY_MS      = 16;
+static const size_t   AEC_DELAY_SAMPLES = AEC_DELAY_MS * (SAMPLE_RATE / 1000);
+static const size_t   AEC_TAPS          = 512;   // 32 ms of span
+
+// How hard each sample is allowed to move the weights.  Lower converges more
+// slowly and sits more still once it gets there; 1.0 is the stability limit
+// for NLMS and nobody sensible runs it there.
+static const float AEC_MU  = 0.30f;
+static const float AEC_EPS = 1e-8f;   // keeps a silent reference out of the divisor
+
+// How loud the reference window has to be before the filter is allowed to
+// learn from it, on the same 0..32767 scale as spk= in the stats line.
+//
+// This is not "is anything playing", which is what it looks like and what an
+// early version of it was.  It is "is the echo this playback causes louder
+// than the mic's own noise floor".  Those are very different thresholds.  At
+// a coupling of 0.12, playback at a level of 30 produces about 3.6 of echo,
+// and the mic reads 2 to 7 with the room silent — so the filter would be
+// fitting its own noise, and does: simulated at that setting it random-walks
+// and delivers no cancellation at all.  Raised until the echo clears the
+// noise floor by a comfortable margin, the same simulation converges to 18
+// dB and puts its largest weight exactly on the true delay.
+//
+// So this tracks the mic's noise floor and the coupling, not the volume.  If
+// mic= starts reading higher with the room quiet, this needs to go up.
+static const float AEC_FAR_ACTIVE = 200.0f;
+
+// Runaway guard.  Nothing legitimate puts the weights anywhere near this — a
+// converged filter here has a norm of a few tenths — so it only ever catches
+// a filter that has been driven somewhere absurd, which sustained double-talk
+// can do until stage 3 teaches it to stop learning during double-talk.  Left
+// in permanently regardless: without it a diverged filter stays diverged
+// until the box is power cycled.
+static const float AEC_W_MAX = 4.0f;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Wire protocol (shared with relay.py — keep the two in sync)
 // ─────────────────────────────────────────────────────────────────────────────
 static const uint8_t TB_MAGIC0  = 'T';
@@ -381,6 +465,14 @@ static volatile uint32_t stat_overruns   = 0;
 static volatile float stat_echo_spk = 0.0f;   // loudest block we played
 static volatile float stat_echo_mic = 0.0f;   // loudest block the mic heard
 static volatile float stat_mic_hz   = 0.0f;   // ... and its dominant frequency
+
+// Echo canceller, accumulated over blocks where the far end was actually
+// playing.  Energies rather than levels, because erle is a power ratio.
+static volatile float    stat_aec_mic_e   = 0.0f;   // what the mic gave us
+static volatile float    stat_aec_res_e   = 0.0f;   // what was left after subtracting
+static volatile uint32_t stat_aec_blocks  = 0;      // qualifying blocks in the interval
+static volatile float    stat_aec_peak_ms = 0.0f;   // lag of the largest weight
+static volatile uint32_t stat_aec_us      = 0;      // worst block, microseconds
 
 // Latest output of the delay probe.  Written by taskMicTx once per window,
 // read by taskStats; probe_blocks stays 0 until the first window completes,
@@ -760,6 +852,136 @@ static inline void micFilter(uint8_t*, size_t) {}
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Echo canceller.  taskSpeaker files away every sample it plays; taskMicTx
+// predicts the echo those samples must have caused and subtracts it.
+// ─────────────────────────────────────────────────────────────────────────────
+#if ENABLE_AEC
+
+static volatile int16_t  aec_ref[AEC_REF_SAMPLES];
+static volatile uint32_t aec_ref_written = 0;   // total samples ever written
+
+// Filter weights, oldest lag first: aec_w[AEC_TAPS - 1] is the weight on the
+// reference sample that lines up exactly with AEC_DELAY_MS ago, and index 0
+// is AEC_TAPS-1 samples older than that.
+static float aec_w[AEC_TAPS];
+
+// The reference window, unwrapped into a straight line once per block so the
+// two inner loops below can walk it without a mask on every access.
+static float aec_x[AUDIO_BLOCK / 2 + AEC_TAPS];
+
+// Called once per played block, silence included.
+static void aecNotePlayed(const uint8_t* data, size_t len) {
+    const int16_t* s = (const int16_t*)data;
+    const size_t   n = len / 2;
+    const uint32_t w = aec_ref_written;
+
+    for (size_t i = 0; i < n; i++) aec_ref[(w + i) & AEC_REF_MASK] = s[i];
+    aec_ref_written = w + (uint32_t)n;
+}
+
+// Called once per captured block.  Modifies the mic only if AEC_APPLY.
+static void aecProcess(uint8_t* data, size_t len) {
+    int16_t*     m = (int16_t*)data;
+    const size_t n = len / 2;
+    if (n != AUDIO_BLOCK / 2) return;   // the buffers below are sized for exactly one block
+
+    const uint32_t t0 = micros();
+    static const float SCALE = 1.0f / 32768.0f;
+
+    // One read of the writer's counter.  The delay is what makes this safe
+    // without a mutex: everything read below was finished with at least
+    // AEC_DELAY_MS ago, so the speaker task is never writing where we look.
+    const uint32_t W     = aec_ref_written;
+    const uint32_t base  = W - (uint32_t)n - (uint32_t)AEC_DELAY_SAMPLES;
+    const uint32_t start = base - (uint32_t)(AEC_TAPS - 1);
+    const size_t   span  = n + AEC_TAPS - 1;
+
+    for (size_t i = 0; i < span; i++) {
+        aec_x[i] = (float)aec_ref[(start + (uint32_t)i) & AEC_REF_MASK] * SCALE;
+    }
+
+    // Power of the window the first sample sees, then slid along rather than
+    // recomputed: one sample joins the window and one leaves it per step.
+    float xpow = 0.0f;
+    for (size_t j = 0; j < AEC_TAPS; j++) xpow += aec_x[j] * aec_x[j];
+
+    // Nothing was playing, so nothing here is echo and there is nothing to
+    // learn.  The filter still runs, so the residual stays continuous.
+    const float far_ms     = AEC_FAR_ACTIVE * SCALE;
+    const bool  far_active = (xpow / (float)AEC_TAPS) > (far_ms * far_ms);
+
+    float mic_e = 0.0f;
+    float res_e = 0.0f;
+
+    for (size_t k = 0; k < n; k++) {
+        const float* xw = &aec_x[k];   // xw[j] pairs with aec_w[j]
+
+        float y = 0.0f;
+        for (size_t j = 0; j < AEC_TAPS; j++) y += aec_w[j] * xw[j];
+
+        const float d = (float)m[k] * SCALE;
+        const float e = d - y;
+
+        // Normalised LMS: divide the step by the reference's own power so the
+        // correction is the same size whether the far end is shouting or
+        // murmuring.  Without that, a loud passage overshoots and diverges
+        // and a quiet one never converges at all.
+        if (far_active) {
+            const float step = AEC_MU * e / (xpow + AEC_EPS);
+            for (size_t j = 0; j < AEC_TAPS; j++) aec_w[j] += step * xw[j];
+        }
+
+        mic_e += d * d;
+        res_e += e * e;
+
+        if (k + 1 < n) {
+            const float in  = aec_x[k + AEC_TAPS];
+            const float out = aec_x[k];
+            xpow += in * in - out * out;
+        }
+
+#if AEC_APPLY
+        const float o = e * 32768.0f;
+        m[k] = (int16_t)((o > 32767.0f) ? 32767.0f : ((o < -32768.0f) ? -32768.0f : o));
+#endif
+    }
+
+    if (far_active) {
+        stat_aec_mic_e += mic_e;
+        stat_aec_res_e += res_e;
+        stat_aec_blocks++;
+
+        // Where the filter decided the echo actually lives.  Index 0 is the
+        // oldest lag, so it counts backwards from the far end of the window.
+        float  best = 0.0f;
+        float  wsum = 0.0f;
+        size_t bj   = 0;
+        for (size_t j = 0; j < AEC_TAPS; j++) {
+            const float a = fabsf(aec_w[j]);
+            wsum += aec_w[j] * aec_w[j];
+            if (a > best) { best = a; bj = j; }
+        }
+        stat_aec_peak_ms = (float)(AEC_DELAY_SAMPLES + (AEC_TAPS - 1 - bj))
+                         / (float)(SAMPLE_RATE / 1000);
+
+        if (!(wsum < AEC_W_MAX * AEC_W_MAX)) {   // NaN-safe: a NaN norm fails this too
+            const float g = (wsum > 0.0f && isfinite(wsum)) ? (AEC_W_MAX / sqrtf(wsum)) : 0.0f;
+            for (size_t j = 0; j < AEC_TAPS; j++) aec_w[j] *= g;
+        }
+    }
+
+    const uint32_t dt = micros() - t0;
+    if (dt > stat_aec_us) stat_aec_us = dt;
+}
+
+#else   // ENABLE_AEC
+
+static inline void aecNotePlayed(const uint8_t*, size_t) {}
+static inline void aecProcess(uint8_t*, size_t) {}
+
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Socket helpers.  Every touch of `udp` goes through these so the mutex can't
 // be forgotten.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -951,6 +1173,7 @@ static void taskMicTx(void*) {
         // so the probe skips those blocks itself rather than being told to.
         micAnalyse(tx_buffer, n);
         probeNoteCaptured(tx_buffer, n);
+        aecProcess(tx_buffer, n);
         micFilter(tx_buffer, n);
         if (link_state == LINK_UP) {
             if (!sendToRelay(TB_AUDIO, tx_audio_seq++, tx_buffer, n)) stat_tx_fail++;
@@ -1074,6 +1297,7 @@ static void taskSpeaker(void*) {
             } else {
                 volume.write(silence, AUDIO_BLOCK);
                 probeNotePlayed(silence, AUDIO_BLOCK);
+                aecNotePlayed(silence, AUDIO_BLOCK);
                 continue;
             }
         }
@@ -1086,6 +1310,7 @@ static void taskSpeaker(void*) {
             // on this side of the volume means the echo path the probe sees —
             // and the canceller after it — does not move when the knob does.
             probeNotePlayed(play_buffer, AUDIO_BLOCK);
+            aecNotePlayed(play_buffer, AUDIO_BLOCK);
         } else {
             // Ran dry: emit silence and re-prime rather than stuttering on
             // whatever trickles in next.
@@ -1093,6 +1318,7 @@ static void taskSpeaker(void*) {
             primed = false;
             volume.write(silence, AUDIO_BLOCK);
             probeNotePlayed(silence, AUDIO_BLOCK);
+            aecNotePlayed(silence, AUDIO_BLOCK);
         }
     }
 }
@@ -1276,6 +1502,11 @@ static void taskStats(void*) {
         float    espk  = stat_echo_spk;   stat_echo_spk   = 0.0f;
         float    emic  = stat_echo_mic;   stat_echo_mic   = 0.0f;
         float    mhz   = stat_mic_hz;     stat_mic_hz     = 0.0f;
+        float    amic  = stat_aec_mic_e;  stat_aec_mic_e  = 0.0f;
+        float    ares  = stat_aec_res_e;  stat_aec_res_e  = 0.0f;
+        uint32_t ablk  = stat_aec_blocks; stat_aec_blocks = 0;
+        float    apk   = stat_aec_peak_ms;
+        uint32_t aus   = stat_aec_us;     stat_aec_us     = 0;
         uint32_t trim  = stat_trims;      stat_trims      = 0;
         uint32_t txf   = stat_tx_fail;    stat_tx_fail    = 0;
 
@@ -1290,6 +1521,23 @@ static void taskStats(void*) {
         char hz_str[16];
         if (mhz > 0.0f) snprintf(hz_str, sizeof(hz_str), "%luHz", (unsigned long)mhz);
         else            snprintf(hz_str, sizeof(hz_str), "-");
+
+        // erle is the whole point of the canceller: how many dB of echo it
+        // actually removed.  peak says where in its window the echo turned
+        // out to be, us says what one block cost.  "idle" means the far end
+        // never played loudly enough for any of it to mean anything.
+        char aec_str[56];
+#if ENABLE_AEC
+        if (ablk && ares > 0.0f && amic > 0.0f) {
+            snprintf(aec_str, sizeof(aec_str), "%.1fdB peak=%.0fms us=%lu n=%lu",
+                     10.0f * log10f(amic / ares), apk,
+                     (unsigned long)aus, (unsigned long)ablk);
+        } else {
+            snprintf(aec_str, sizeof(aec_str), "idle");
+        }
+#else
+        snprintf(aec_str, sizeof(aec_str), "off");
+#endif
 
         char delay_str[40];
 #if ENABLE_DELAY_PROBE
@@ -1312,7 +1560,7 @@ static void taskStats(void*) {
         Serial.printf(
             "[link=%s rssi=%d] tx=%lu B/s rx=%lu B/s | jitter=%lu ms trim=%lu "
             "lost=%lu late=%lu under=%lu over=%lu txfail=%lu | "
-            "echo spk=%lu mic=%lu hz=%s delay=%s | heap=%lu\n",
+            "echo spk=%lu mic=%lu hz=%s delay=%s | aec %s | heap=%lu\n",
             linkStateName(link_state), WiFi.RSSI(),
             (unsigned long)(tx * 1000 / period_ms),
             (unsigned long)(rx * 1000 / period_ms),
@@ -1321,7 +1569,7 @@ static void taskStats(void*) {
             (unsigned long)lost, (unsigned long)late,
             (unsigned long)under, (unsigned long)over, (unsigned long)txf,
             (unsigned long)espk, (unsigned long)emic,
-            hz_str, delay_str,
+            hz_str, delay_str, aec_str,
             (unsigned long)ESP.getFreeHeap());
     }
 }
