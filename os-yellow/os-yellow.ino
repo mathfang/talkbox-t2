@@ -327,9 +327,22 @@ static const size_t AEC_REF_MASK    = AEC_REF_SAMPLES - 1;
 // begins before the window and AEC_DELAY_MS is too big; pinned near the end
 // means the window is too short or starts too early.  Somewhere in the middle
 // means it fits.
-static const uint32_t AEC_DELAY_MS      = 16;
+//
+// The window started at 16 ms, and peak= then reported 42 ms on every line of
+// a minute-long call without once moving.  That is a good measurement and a
+// badly placed window: the direct arrival sat 6 ms from the far edge, and
+// since the enclosure's ringing arrives after the direct sound rather than
+// before it, almost none of the tail was inside.  Moved to start at 28 ms,
+// which keeps 14 ms of headroom ahead of a very stable 42 and takes the
+// captured tail from 6 ms to 18.
+//
+// Moved rather than lengthened because there is no room to lengthen.  us= was
+// running to 9,985 against a 16,000 us block, so 512 taps already cost 62% of
+// the budget; 1024 would need 20 ms to do 16 ms of work.  Shifting the window
+// is free, and buys most of what a longer one would.
+static const uint32_t AEC_DELAY_MS      = 28;
 static const size_t   AEC_DELAY_SAMPLES = AEC_DELAY_MS * (SAMPLE_RATE / 1000);
-static const size_t   AEC_TAPS          = 512;   // 32 ms of span
+static const size_t   AEC_TAPS          = 512;   // 32 ms of span, so 28 to 60 ms
 
 // How hard each sample is allowed to move the weights.  Lower converges more
 // slowly and sits more still once it gets there; 1.0 is the stability limit
@@ -353,6 +366,54 @@ static const float AEC_EPS = 1e-8f;   // keeps a silent reference out of the div
 // So this tracks the mic's noise floor and the coupling, not the volume.  If
 // mic= starts reading higher with the room quiet, this needs to go up.
 static const float AEC_FAR_ACTIVE = 200.0f;
+
+// Double-talk detector.
+//
+// The leftover after subtraction is the filter's error signal, and it is also
+// where your voice is.  The filter cannot tell those apart: hand it a leftover
+// full of near-end speech and it will dutifully adjust itself to cancel you,
+// which is how a canceller turns a call one-way.  Measured last session, 400
+// blocks of double-talk drove the weights from a norm of 0.12 to 0.44 and the
+// echo cancellation to nothing.
+//
+// So it has to stop learning while both ends are talking.  Not stop
+// filtering — it keeps subtracting with the weights it already has, which is
+// exactly what you want, since those are still correct.  It just stops
+// updating them until the near end is quiet again.
+//
+// The test is the ratio of what the mic hears to what we played, which is the
+// coupling, and we know what the coupling is: 0.07 to 0.21, measured across
+// two sessions.  A mic sitting well above that cannot be echo, because the
+// path does not have that much gain, and the only other thing it can be is
+// someone in the room.  This is the Geigel test, and its virtue is that it
+// asks nothing of the filter: a brand new filter that has learned nothing
+// still gets the right answer.  A test built on comparing the mic against the
+// filter's own prediction would call every block double-talk until the filter
+// converged, and the filter cannot converge while it is being told not to.
+//
+// Where to put the threshold is decided by an asymmetry.  A false freeze
+// costs AEC_DT_HANGOVER blocks of not learning, and the echo path is a sealed
+// box that is not going anywhere, so there is always another chance to learn
+// — it is nearly free.  A missed talker is not free: the filter spends that
+// whole time learning to cancel a voice.  So this wants to sit as low as the
+// coupling allows rather than as high as it can get away with.
+//
+// Simulated against a path calibrated to the measured coupling: at 0.35 a
+// near-end talker 11 dB below the far end goes undetected at every coupling
+// from 0.12 to 0.21, and the weights drift 27% away from the true path while
+// it does.  At 0.30 that talker is caught at every one of them, false freezes
+// during far-end-only speech run 2 to 4%, and the converged weight norm comes
+// out equal to the path's real gain to three figures.
+//
+// Levels are mean |sample|, the same statistic as spk= and mic= in the stats
+// line, so this threshold can be checked directly against the coupling those
+// two report.
+static const float AEC_DT_THRESHOLD = 0.30f;
+
+// Blocks to stay frozen after the near end goes quiet.  Speech has gaps in it
+// that are not the end of speech, and the echo of what was just said is still
+// arriving.  12 blocks is a bit under 200 ms.
+static const size_t AEC_DT_HANGOVER = 12;
 
 // Runaway guard.  Nothing legitimate puts the weights anywhere near this — a
 // converged filter here has a norm of a few tenths — so it only ever catches
@@ -470,7 +531,8 @@ static volatile float stat_mic_hz   = 0.0f;   // ... and its dominant frequency
 // playing.  Energies rather than levels, because erle is a power ratio.
 static volatile float    stat_aec_mic_e   = 0.0f;   // what the mic gave us
 static volatile float    stat_aec_res_e   = 0.0f;   // what was left after subtracting
-static volatile uint32_t stat_aec_blocks  = 0;      // qualifying blocks in the interval
+static volatile uint32_t stat_aec_blocks  = 0;      // blocks the filter actually learned from
+static volatile uint32_t stat_aec_frozen  = 0;      // ... and blocks held back by double-talk
 static volatile float    stat_aec_peak_ms = 0.0f;   // lag of the largest weight
 static volatile uint32_t stat_aec_us      = 0;      // worst block, microseconds
 
@@ -896,9 +958,13 @@ static void aecProcess(uint8_t* data, size_t len) {
     const uint32_t start = base - (uint32_t)(AEC_TAPS - 1);
     const size_t   span  = n + AEC_TAPS - 1;
 
+    float ref_sum = 0.0f;
     for (size_t i = 0; i < span; i++) {
-        aec_x[i] = (float)aec_ref[(start + (uint32_t)i) & AEC_REF_MASK] * SCALE;
+        const float v = (float)aec_ref[(start + (uint32_t)i) & AEC_REF_MASK] * SCALE;
+        aec_x[i] = v;
+        ref_sum += fabsf(v);
     }
+    const float ref_level = ref_sum / (float)span;
 
     // Power of the window the first sample sees, then slid along rather than
     // recomputed: one sample joins the window and one leaves it per step.
@@ -909,6 +975,33 @@ static void aecProcess(uint8_t* data, size_t len) {
     // learn.  The filter still runs, so the residual stays continuous.
     const float far_ms     = AEC_FAR_ACTIVE * SCALE;
     const bool  far_active = (xpow / (float)AEC_TAPS) > (far_ms * far_ms);
+
+    // Measured before the loop below, which may overwrite the mic in place.
+    float mic_sum = 0.0f;
+    for (size_t k = 0; k < n; k++) mic_sum += fabsf((float)m[k] * SCALE);
+    const float mic_level = mic_sum / (float)n;
+
+    // More in the mic than the coupling could possibly account for, so what is
+    // in there is not our echo.  The hangover is what stops a gap between two
+    // words from counting as the end of the sentence.
+    //
+    // Tested only while the far end is actually playing, which is not a
+    // detail.  A ratio against a silent reference is a division by nothing:
+    // during the pauses between someone's phrases ref_level falls to the
+    // floor, the mic's own hiss clears any threshold you care to name, and
+    // every pause trips the detector.  The hangover then eats the first 200 ms
+    // of whatever they say next.  Simulated against a talker who pauses
+    // normally, that alone took the filter from converging to never learning
+    // at all.  Nothing is lost by skipping the test: with no far end there is
+    // no echo to protect and no learning going on to protect it from.
+    static size_t dt_hold  = 0;
+    if (far_active) {
+        if (mic_level > AEC_DT_THRESHOLD * ref_level) dt_hold = AEC_DT_HANGOVER;
+        else if (dt_hold > 0)                         dt_hold--;
+    }
+
+    const bool learn = far_active && (dt_hold == 0);
+    if (far_active && !learn) stat_aec_frozen++;
 
     float mic_e = 0.0f;
     float res_e = 0.0f;
@@ -926,7 +1019,7 @@ static void aecProcess(uint8_t* data, size_t len) {
         // correction is the same size whether the far end is shouting or
         // murmuring.  Without that, a loud passage overshoots and diverges
         // and a quiet one never converges at all.
-        if (far_active) {
+        if (learn) {
             const float step = AEC_MU * e / (xpow + AEC_EPS);
             for (size_t j = 0; j < AEC_TAPS; j++) aec_w[j] += step * xw[j];
         }
@@ -946,7 +1039,11 @@ static void aecProcess(uint8_t* data, size_t len) {
 #endif
     }
 
-    if (far_active) {
+    // Only blocks the filter learned from count toward erle.  During
+    // double-talk the leftover is mostly your voice, which the filter was
+    // never trying to remove, so including those would report a canceller
+    // getting worse whenever someone speaks.  Judge the freeze by dt= instead.
+    if (learn) {
         stat_aec_mic_e += mic_e;
         stat_aec_res_e += res_e;
         stat_aec_blocks++;
@@ -1505,6 +1602,7 @@ static void taskStats(void*) {
         float    amic  = stat_aec_mic_e;  stat_aec_mic_e  = 0.0f;
         float    ares  = stat_aec_res_e;  stat_aec_res_e  = 0.0f;
         uint32_t ablk  = stat_aec_blocks; stat_aec_blocks = 0;
+        uint32_t afrz  = stat_aec_frozen; stat_aec_frozen = 0;
         float    apk   = stat_aec_peak_ms;
         uint32_t aus   = stat_aec_us;     stat_aec_us     = 0;
         uint32_t trim  = stat_trims;      stat_trims      = 0;
@@ -1529,9 +1627,14 @@ static void taskStats(void*) {
         char aec_str[56];
 #if ENABLE_AEC
         if (ablk && ares > 0.0f && amic > 0.0f) {
-            snprintf(aec_str, sizeof(aec_str), "%.1fdB peak=%.0fms us=%lu n=%lu",
+            snprintf(aec_str, sizeof(aec_str), "%.1fdB peak=%.0fms dt=%lu%% us=%lu n=%lu",
                      10.0f * log10f(amic / ares), apk,
+                     (unsigned long)(100UL * afrz / (afrz + ablk)),
                      (unsigned long)aus, (unsigned long)ablk);
+        } else if (afrz) {
+            // Far end was playing the whole time and the filter never got to
+            // learn from any of it: the near end never stopped talking.
+            snprintf(aec_str, sizeof(aec_str), "held dt=100%% frozen=%lu", (unsigned long)afrz);
         } else {
             snprintf(aec_str, sizeof(aec_str), "idle");
         }
