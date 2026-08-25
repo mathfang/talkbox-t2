@@ -281,11 +281,12 @@ static const float MAX_VOLUME = 7.5f;
 // ─────────────────────────────────────────────────────────────────────────────
 #define ENABLE_MIC_FILTER 1
 
-// Stage 1, the blunt one: everything above the corner comes down by this much.
+// First section, the blunt one: everything above the corner comes down by
+// this much.
 static const float MIC_SHELF_HZ = 3000.0f;
 static const float MIC_SHELF_DB = -12.0f;
 
-// Stage 2, the aimed one.  Q sets how wide the bucket is — bandwidth at the
+// Second section, the aimed one.  Q sets how wide the bucket is — bandwidth at the
 // half-power points is roughly MIC_NOTCH_HZ / MIC_NOTCH_Q, so 475 Hz here.
 // Widen it (lower Q) if the ring wanders, deepen it (more dB) if it holds
 // still and persists.
@@ -1314,14 +1315,16 @@ static void taskMicTx(void*) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        // Order matters.  Both diagnostics read the raw mic so that what they
-        // report describes the box rather than our own filtering, and the
-        // filter goes last so only the wire sees it.  A canceller belongs
-        // between the probe and the filter, where the echo path it has to
-        // model is still the untouched one.
+        // Order matters.  The two diagnostics run first and only read, so what
+        // they report describes the box rather than our own processing — which
+        // is why mic= stays comparable against spk= as a coupling figure no
+        // matter what the canceller is doing.  Then the canceller subtracts
+        // the echo, seeing the microphone exactly as the room delivered it.
+        // The shelf and notch go last, so only the wire gets those.
         //
         // All of this runs even with the link down.  Nothing is playing then,
-        // so the probe skips those blocks itself rather than being told to.
+        // so both the probe and the canceller skip those blocks themselves
+        // rather than being told to.
         micAnalyse(tx_buffer, n);
         probeNoteCaptured(tx_buffer, n);
         aecProcess(tx_buffer, n);
