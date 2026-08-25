@@ -183,7 +183,15 @@ static const float PROBE_FAR_ACTIVE = 30.0f;
 //
 // Below it the delay is withheld rather than guessed at, because a plausible
 // wrong number read off a log is worse than no number.
-static const float PROBE_MIN_CORR = 0.40f;
+//
+// Raised from 0.40 after one line came back reading 1024 ms at r = 47%.  That
+// is PROBE_MAX_LAG exactly — the far edge of everything it searches, which is
+// where an argmax lands when there is no peak to find — and 0.40 let it
+// through.  Hence both halves of the test below: a correlation this side of
+// 0.55, and a winner that is not sitting on the boundary.  A peak at the edge
+// of a search range is not a measurement, for the same reason peak= at the
+// edge of the filter's window was not one.
+static const float PROBE_MIN_CORR = 0.55f;
 
 // Reported when the correlation is too weak to believe.
 static const uint32_t PROBE_NO_DELAY = 0xFFFFFFFFul;
@@ -279,7 +287,7 @@ static const float MIC_NOTCH_Q  = 4.0f;
 static const float MIC_HZ_FLOOR = 30.0f;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Echo canceller — stage 1, measuring only
+// Echo canceller
 //
 // The suppressor this replaced turned the mic down when it thought it was
 // hearing itself.  A canceller does something different in kind: it knows
@@ -294,20 +302,25 @@ static const float MIC_HZ_FLOOR = 30.0f;
 // smaller.  Sixteen thousand nudges a second converges on this box in about a
 // second.
 //
-// AEC_APPLY is 0 here, so none of that reaches the wire yet.  This stage
-// exists to answer one question — is the reference we hand the filter really
-// the audio that caused the echo in this mic block — and it answers it with
-// erle=, which is how many dB of echo the filter managed to remove.  A filter
-// fed a misaligned reference learns nothing and reports 0.0 dB, so the number
-// is a plumbing test that cannot pass by accident.  Only once it reads
-// clearly positive is it worth putting in the audio path.
+// This is live: what leaves for the far end is the leftover, not the mic.
 //
-// (An earlier sketch of this stage had the filter do nothing at all.  That
-// would have reported 0.0 dB whether the plumbing was perfect or completely
-// broken, which is no test.)
+// It ran measuring-only for two sessions first, with AEC_APPLY at 0, because
+// a canceller wired straight into a call is very hard to tell apart from a
+// broken one.  Measuring first meant erle= could answer "is the reference we
+// hand the filter really the audio that caused the echo in this mic block"
+// before anything depended on the answer — a filter fed a misaligned
+// reference learns nothing and reports 0.0 dB, so it is a plumbing test that
+// cannot pass by accident.  It read 15 dB on hardware, and the double-talk
+// detector held erle within 3 dB whether or not both ends were talking.  That
+// is what earned this the audio path.
+//
+// Setting AEC_APPLY back to 0 returns it to measuring without changing
+// anything else, which is the first thing to try if the call sounds wrong.
+// Note that mic= in the stats line is sampled before any of this, so it keeps
+// reporting the raw microphone and the coupling stays readable against spk=.
 // ─────────────────────────────────────────────────────────────────────────────
 #define ENABLE_AEC  1
-#define AEC_APPLY   0    // stage 1: measure, never modify
+#define AEC_APPLY   1    // 0 returns to measuring without touching the audio
 
 // Reference history.  Kept in samples rather than blocks because the filter
 // needs a run that crosses block boundaries, and sized to a power of two so
@@ -328,21 +341,29 @@ static const size_t AEC_REF_MASK    = AEC_REF_SAMPLES - 1;
 // means the window is too short or starts too early.  Somewhere in the middle
 // means it fits.
 //
-// The window started at 16 ms, and peak= then reported 42 ms on every line of
-// a minute-long call without once moving.  That is a good measurement and a
-// badly placed window: the direct arrival sat 6 ms from the far edge, and
-// since the enclosure's ringing arrives after the direct sound rather than
-// before it, almost none of the tail was inside.  Moved to start at 28 ms,
-// which keeps 14 ms of headroom ahead of a very stable 42 and takes the
-// captured tail from 6 ms to 18.
+// Took two moves to get this right, and the first one taught the lesson.
+//
+// The window began at 16 ms and peak= reported 42 ms on every line of a
+// minute-long call.  Read as a measurement that looked authoritative.  Moved
+// the window to 28 ms on the strength of it, and peak= promptly reported 50
+// on every line of the next call — from a filter whose window now reached
+// that far.  The echo had not moved.  42 was never where the echo was: it was
+// the best a filter could do with taps that stopped at 48, which is to say
+// the number was an artefact of the window rather than a property of the box.
+//
+// The delay probe had been saying 48 ms for three sessions the whole time.
+//
+// So: a peak sitting near the edge of its window is not a measurement, it is
+// a filter running out of room, and the way to tell is to move the window and
+// see whether the answer follows.  This one does not — 50 ms holds with 14 ms
+// of headroom either side of it.
 //
 // Moved rather than lengthened because there is no room to lengthen.  us= was
 // running to 9,985 against a 16,000 us block, so 512 taps already cost 62% of
-// the budget; 1024 would need 20 ms to do 16 ms of work.  Shifting the window
-// is free, and buys most of what a longer one would.
-static const uint32_t AEC_DELAY_MS      = 28;
+// the budget; 1024 would need 20 ms to do 16 ms of work.  Shifting is free.
+static const uint32_t AEC_DELAY_MS      = 36;
 static const size_t   AEC_DELAY_SAMPLES = AEC_DELAY_MS * (SAMPLE_RATE / 1000);
-static const size_t   AEC_TAPS          = 512;   // 32 ms of span, so 28 to 60 ms
+static const size_t   AEC_TAPS          = 512;   // 32 ms of span, so 36 to 68 ms
 
 // How hard each sample is allowed to move the weights.  Lower converges more
 // slowly and sits more still once it gets there; 1.0 is the stability limit
@@ -752,9 +773,8 @@ static void probeNoteCaptured(const uint8_t* data, size_t len) {
         }
     }
 
-    probe_delay_ms = (best_corr >= PROBE_MIN_CORR)
-                   ? (uint32_t)(best_lag * AUDIO_BLOCK_MS)
-                   : PROBE_NO_DELAY;
+    const bool credible = (best_corr >= PROBE_MIN_CORR) && (best_lag < PROBE_MAX_LAG);
+    probe_delay_ms = credible ? (uint32_t)(best_lag * AUDIO_BLOCK_MS) : PROBE_NO_DELAY;
     probe_corr     = best_corr;
     probe_blocks   = probe_n;
 
