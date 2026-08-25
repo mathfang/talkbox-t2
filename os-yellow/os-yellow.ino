@@ -68,6 +68,7 @@ static const int LED_PERIOD_MS = 33;    // ~30 Hz LED refresh
 static const float   POT_QUIET_LEVEL   = 0.10f;   // 10% of pot travel
 static const uint8_t PULSE_RAMP_STEP   = 8;       // depth per frame; ~1 s full fade
 static const uint8_t PULSE_RATE        = 4;       // phase per frame; ~2 s period
+static const uint8_t PULSE_RATE_FAST   = 8;       // ~1 s; separates "joining" from "needs setup"
 static const int PORTAL_PERIOD_MS = 20;   // portal HTTP/DNS service interval
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,15 +216,26 @@ static const uint32_t PROBE_NO_DELAY = 0xFFFFFFFFul;
 // again with both handsets filtering, mic over spk runs 0.07 to 0.20 against
 // the 0.25 above: a notch at each end roughly halves the echo at the other.
 //
-// At 0.12 the loop multiplies by 0.6 per hop at full pot and 0.36 round trip,
-// which is stable.  The whole knob is usable now, give or take the last of
-// the travel, where a worst-case 0.20 puts the round trip back near unity.
-// Left at 5.0, which is finally a number that means something.
+// Raised to 7.5 now that the canceller is in the path.  With 15 dB of
+// cancellation the loop multiplies by 0.16 per hop at full pot and 0.026
+// round trip, which is 32 dB below unity and not close to anything.
 //
-// Worth knowing that VolumeStream clips at +/-32767, so a boost this large
-// hard-clips loud passages, and clipping is the main thing limiting how much
-// of the echo a linear canceller can remove.
-static const float MAX_VOLUME = 5.0f;
+// The exposure is the first seconds of a fresh boot, before the filter has
+// heard enough speech to converge.  With no cancellation at all the loop runs
+// 0.9 per hop and 0.81 round trip at typical coupling — under unity, but not
+// by much, and a worst-case 0.21 coupling would be over it.  The filter
+// converges within a few seconds of the first person talking and its weights
+// then persist for the rest of the session, so this is a boot-time window
+// rather than a running condition.  If a fresh call ever rings for a moment
+// at the top of the travel, that is what happened; back the knob off.
+//
+// Note that digital boost past the clipping point does not buy loudness, it
+// buys distortion — the peaks are already at the rail and only the average
+// rises.  Real loudness without that costs analogue gain at the amplifier
+// instead, which raises acoustic output per digital sample rather than
+// raising the samples.  The canceller would re-converge on the new coupling
+// by itself.
+static const float MAX_VOLUME = 7.5f;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mic filter chain
@@ -517,7 +529,23 @@ CRGB leds[NUM_LEDS];
 
 I2SStream    in;
 I2SStream    out;
-VolumeStream volume(out);   // scales, then forwards to `out` for us
+
+// Speaker gain, set by the pot and applied by taskSpeaker.
+//
+// Not VolumeStream, which is what used to do this, because its clamp lives
+// inside `if (!info.allow_boost)` — so enabling boost, which is the only way
+// to get a factor above 1.0, is also what turns the clamp off.  Past that
+// point it casts an out-of-range float straight to int16_t, which is
+// undefined behaviour, and in practice destroys every sample above
+// 32767/gain.  At the old 5.0 that was everything past 6553, which speech
+// peaks reach easily; the loudest moments of every call have been getting
+// mangled.
+//
+// Doing it here instead costs one multiply per sample and saturates properly.
+// It also makes the reference tap unambiguous: what the canceller records is
+// the same buffer the amplifier gets, clipping and all, which is exactly what
+// a linear filter needs in order to model a path that clips.
+static volatile float spk_gain = 0.0f;
 
 WiFiUDP          udp;
 static IPAddress relay_ip;
@@ -662,6 +690,19 @@ private:
 };
 
 static JitterBuffer jitter;
+
+// Scales a playback block by the pot's gain, in place, saturating rather than
+// wrapping.  Zeros stay zeros, so a silent block stays silent at any gain.
+static void applyGain(uint8_t* data, size_t len) {
+    const float  g = spk_gain;
+    int16_t*     s = (int16_t*)data;
+    const size_t n = len / 2;
+
+    for (size_t i = 0; i < n; i++) {
+        const float v = (float)s[i] * g;
+        s[i] = (int16_t)((v > 32767.0f) ? 32767.0f : ((v < -32768.0f) ? -32768.0f : v));
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Echo delay probe.  taskSpeaker reports the level of every block it hands the
@@ -1255,14 +1296,7 @@ static void setupSpeaker() {
     cfg_out.buffer_size     = I2S_DMA_CHUNK_BYTES;
     cfg_out.buffer_count    = I2S_DMA_CHUNKS;
 
-    auto vcfg_out = volume.defaultConfig();
-    vcfg_out.copyFrom(cfg_out);
-    vcfg_out.allow_boost = true;
-
     out.begin(cfg_out);
-    volume.begin(vcfg_out);
-    volume.setVolume(1.0);
-
     Serial.println("Speaker is running");
 }
 
@@ -1398,10 +1432,9 @@ static void taskNetRx(void*) {
 static void taskSpeaker(void*) {
     static uint8_t play_buffer[AUDIO_BLOCK];
 
-    // Deliberately NOT const: VolumeStream::write() takes a const pointer but
-    // casts it away and scales the samples in place, so a const array would be
-    // placed in flash and the store would panic with a LoadStoreError.  Scaling
-    // zeros still gives zeros, so this stays silent no matter the volume.
+    // Deliberately NOT const: applyGain() scales in place, so a const array
+    // would be placed in flash and the store would panic with a LoadStoreError.
+    // Scaling zeros still gives zeros, so this stays silent at any gain.
     static uint8_t silence[AUDIO_BLOCK] = {0};
 
     bool primed = false;
@@ -1412,7 +1445,8 @@ static void taskSpeaker(void*) {
             if (jitter.available() >= JITTER_PREFILL) {
                 primed = true;
             } else {
-                volume.write(silence, AUDIO_BLOCK);
+                applyGain(silence, AUDIO_BLOCK);
+                out.write(silence, AUDIO_BLOCK);
                 probeNotePlayed(silence, AUDIO_BLOCK);
                 aecNotePlayed(silence, AUDIO_BLOCK);
                 continue;
@@ -1420,12 +1454,13 @@ static void taskSpeaker(void*) {
         }
 
         if (jitter.pop(play_buffer, AUDIO_BLOCK)) {
-            volume.write(play_buffer, AUDIO_BLOCK);
-            // Measured after the write because VolumeStream scales in place:
-            // this is what actually reached the amplifier, pot position and
-            // all, which is exactly what the mic will hear.  Keeping the tap
-            // on this side of the volume means the echo path the probe sees —
-            // and the canceller after it — does not move when the knob does.
+            applyGain(play_buffer, AUDIO_BLOCK);
+            out.write(play_buffer, AUDIO_BLOCK);
+            // Recorded after the gain, so this is what actually reached the
+            // amplifier, pot position and clipping and all, which is exactly
+            // what the mic will hear.  Keeping the tap on this side of the
+            // volume means the echo path the probe sees — and the canceller
+            // after it — does not move when the knob does.
             probeNotePlayed(play_buffer, AUDIO_BLOCK);
             aecNotePlayed(play_buffer, AUDIO_BLOCK);
         } else {
@@ -1433,7 +1468,8 @@ static void taskSpeaker(void*) {
             // whatever trickles in next.
             stat_underruns++;
             primed = false;
-            volume.write(silence, AUDIO_BLOCK);
+            applyGain(silence, AUDIO_BLOCK);
+            out.write(silence, AUDIO_BLOCK);
             probeNotePlayed(silence, AUDIO_BLOCK);
             aecNotePlayed(silence, AUDIO_BLOCK);
         }
@@ -1450,7 +1486,7 @@ static void taskPotTx(void*) {
         float pot_norm = readPot();
         local_pot = pot_norm;
 
-        volume.setVolume(pot_norm * MAX_VOLUME);
+        spk_gain = pot_norm * MAX_VOLUME;
 
         if (link_state == LINK_UP) {
             sendToRelay(TB_POT, tx_pot_seq++, &pot_norm, sizeof(pot_norm));
@@ -1466,7 +1502,9 @@ static void taskLeds(void*) {
     uint8_t pulse_depth = 0;   // 0 = steady, 255 = full swing down to black
 
     for (;;) {
-        breathe += PULSE_RATE;   // free-running, so state changes never jump phase
+        // Free-running, so state changes never jump phase.  Both WiFi-less
+        // states are blue; the quicker pace is the one actively working on it.
+        breathe += (link_state == LINK_CONNECTING) ? PULSE_RATE_FAST : PULSE_RATE;
 
         if (link_state == LINK_UP) {
             // Pulse only while they are audible to us and we are not to them.
@@ -1482,16 +1520,14 @@ static void taskLeds(void*) {
             // One dim pulse, recolored per state.  White lights all three
             // channels, so it reads far brighter than a saturated hue at the
             // same value and gets its own cap to keep the states one family.
-            uint8_t hue = 160, sat = 200, cap = 60;   // blue: needs setup
-            uint8_t wave = sin8(breathe);
+            uint8_t hue = 160, sat = 200, cap = 60;   // blue: needs setup, or joining WiFi
             switch (link_state) {
             case LINK_WIFI_DOWN:     hue = 0;            break;   // red:   no WiFi
-            case LINK_CONNECTING:    sat = 0;  cap = 40; break;   // white: joining the network
             case LINK_NO_RELAY:      hue = 96;           break;   // green: waiting on the relay
-            case LINK_WAITING_PEER:  wave = 255;         break;   // blue, steady: peer offline
+            case LINK_WAITING_PEER:  sat = 0;  cap = 40; break;   // white: peer offline
             default:                                     break;
             }
-            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(wave, cap)));
+            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(sin8(breathe), cap)));
         }
         FastLED.show();
         vTaskDelay(pdMS_TO_TICKS(LED_PERIOD_MS));
