@@ -59,16 +59,16 @@ static const uint16_t LOCAL_PORT = 6000;
 
 static const int POT_PIN       = 34;
 static const int POT_PERIOD_MS = 33;    // ~30 Hz pot updates
-static const int LED_PERIOD_MS = 33;    // ~30 Hz LED refresh
+static const int LED_PERIOD_MS = 10;    // 100 Hz — dithering needs a fast refresh
 
 // "Speak up" cue: while the peer has their volume up but ours is still down,
 // the LEDs pulse instead of sitting steady, so a knob left at zero is obvious
 // from across the room.  The depth ramps rather than snaps, so raising our own
 // knob fades the pulse out into a steady glow.
 static const float   POT_QUIET_LEVEL   = 0.10f;   // 10% of pot travel
-static const uint8_t PULSE_RAMP_STEP   = 8;       // depth per frame; ~1 s full fade
-static const uint8_t PULSE_RATE        = 4;       // phase per frame; ~2 s period
-static const uint8_t PULSE_RATE_FAST   = 8;       // ~1 s; separates "joining" from "needs setup"
+static const uint8_t  PULSE_RAMP_STEP  = 3;       // depth per frame; ~0.9 s full fade
+static const uint16_t PULSE_RATE       = 328;     // phase per frame, 1/65536 cycle; ~2 s
+static const uint16_t PULSE_RATE_FAST  = 655;     // ~1 s; separates "joining" from "needs setup"
 static const int PORTAL_PERIOD_MS = 20;   // portal HTTP/DNS service interval
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1265,7 +1265,7 @@ static void setupLeds() {
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 400);
     FastLED.addLeds<APA102, LED_DATA_PIN, LED_CLOCK_PIN, BGR, DATA_RATE_MHZ(1)>(leds, NUM_LEDS);
     FastLED.setBrightness(80);
-    FastLED.setDither(1);
+    FastLED.setDither(1);   // borrows resolution back below the 8-bit floor
 }
 
 static void setupMic() {
@@ -1498,13 +1498,14 @@ static void taskPotTx(void*) {
 // LEDs show the peer's pot while the call is up, and the link state otherwise,
 // so a failure 2000 miles away is still visible from the handset itself.
 static void taskLeds(void*) {
-    uint8_t breathe     = 0;
-    uint8_t pulse_depth = 0;   // 0 = steady, 255 = full swing down to black
+    uint16_t phase       = 0;
+    uint8_t  pulse_depth = 0;   // 0 = steady, 255 = full swing down to black
 
     for (;;) {
         // Free-running, so state changes never jump phase.  Both WiFi-less
         // states are blue; the quicker pace is the one actively working on it.
-        breathe += (link_state == LINK_CONNECTING) ? PULSE_RATE_FAST : PULSE_RATE;
+        phase += (link_state == LINK_CONNECTING) ? PULSE_RATE_FAST : PULSE_RATE;
+        uint8_t wave = sin8(phase >> 8);
 
         if (link_state == LINK_UP) {
             // Pulse only while they are audible to us and we are not to them.
@@ -1514,20 +1515,23 @@ static void taskLeds(void*) {
 
             // Remote pot still sets the ceiling; the pulse swings below it.
             uint8_t peak   = (uint8_t)(remote_pot * 255);
-            uint8_t factor = 255 - scale8(pulse_depth, 255 - sin8(breathe));
+            uint8_t factor = 255 - scale8(pulse_depth, 255 - wave);
             fill_solid(leds, NUM_LEDS, CHSV(24, 200, scale8(peak, factor)));
         } else {
-            // One dim pulse, recolored per state.  White lights all three
-            // channels, so it reads far brighter than a saturated hue at the
-            // same value and gets its own cap to keep the states one family.
+            // One dim pulse, recolored per state.  White is mixed warm rather
+            // than fully desaturated: this strip's green and blue dies outrun
+            // its red, so a neutral white comes out teal, and it lights all
+            // three channels at once so it also needs a lower cap to sit in the
+            // same brightness family as the saturated hues.
             uint8_t hue = 160, sat = 200, cap = 60;   // blue: needs setup, or joining WiFi
             switch (link_state) {
             case LINK_WIFI_DOWN:     hue = 0;            break;   // red:   no WiFi
             case LINK_NO_RELAY:      hue = 96;           break;   // green: waiting on the relay
-            case LINK_WAITING_PEER:  sat = 0;  cap = 40; break;   // white: peer offline
+            case LINK_WAITING_PEER:  hue = 32; sat = 90;         // warm white: peer offline
+                                     cap = 44;           break;
             default:                                     break;
             }
-            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(sin8(breathe), cap)));
+            fill_solid(leds, NUM_LEDS, CHSV(hue, sat, scale8(wave, cap)));
         }
         FastLED.show();
         vTaskDelay(pdMS_TO_TICKS(LED_PERIOD_MS));
