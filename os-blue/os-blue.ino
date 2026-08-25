@@ -1,5 +1,5 @@
 /*
- * TalkBox handset — "yellow"
+ * TalkBox handset — "blue"
  *
  * Two handsets talk to each other over the public internet by way of a small
  * UDP relay running on a VPS (see ../relay/relay.py).  Neither handset needs a
@@ -29,7 +29,7 @@
 // Per-device configuration.  This block is the ONLY thing that differs between
 // os-blue/os-blue.ino and os-yellow/os-yellow.ino.
 // ─────────────────────────────────────────────────────────────────────────────
-static const char* DEVICE_ID   = "yellow";        // must be unique within the room
+static const char* DEVICE_ID   = "blue";        // must be unique within the room
 static const char* ROOM_ID     = "talkbox";     // both handsets share this
 static const char* ROOM_SECRET = "change-me";   // must match the relay's --secret
 

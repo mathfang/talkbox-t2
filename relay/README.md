@@ -78,7 +78,7 @@ rooms: talkbox[blue+yellow] | forwarded 64.9 kB/s (125 pkt/s) | dropped 0
 
 ## 4. Point the handsets at it
 
-In **both** `os/os.ino` and `os-yellow/os-yellow.ino`, edit the config block at
+In **both** `os-blue/os-blue.ino` and `os-yellow/os-yellow.ino`, edit the config block at
 the top:
 
 ```cpp
