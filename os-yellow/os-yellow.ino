@@ -276,23 +276,40 @@ static const float MAX_VOLUME = 7.5f;
 // third stage goes in exactly the same way.  The readings loosely grouped
 // around 1100 to 1400 Hz are the ones to watch.
 //
+// Both were then relaxed, because they were set when this chain was the only
+// thing standing between the box and a howl, and it no longer is — the
+// canceller takes 15 dB out before anything reaches the wire.  What they cost
+// in the meantime was most of the audio: measured, the old settings had
+// everything above 1.5 kHz down by 5 to 20 dB, which is not an equaliser, it
+// is removing the top two thirds of the spectrum.  Speech survived it because
+// speech lives underneath.  Music did not.
+//
 // Applied to what we transmit rather than what we play.  The loop passes
 // through here either way, and this way our own playback stays full range.
 // ─────────────────────────────────────────────────────────────────────────────
 #define ENABLE_MIC_FILTER 1
 
 // First section, the blunt one: everything above the corner comes down by
-// this much.
-static const float MIC_SHELF_HZ = 3000.0f;
-static const float MIC_SHELF_DB = -12.0f;
+// this much.  Was -12 dB from 3 kHz, which took the consonants and all the
+// air with it.  Now a gentle tilt, starting above the range where speech gets
+// its definition, and kept at all only as insurance for the seconds after a
+// boot when the canceller has not converged and a resonance up there would
+// have nothing else holding it down.
+static const float MIC_SHELF_HZ = 4000.0f;
+static const float MIC_SHELF_DB = -4.0f;
 
-// Second section, the aimed one.  Q sets how wide the bucket is — bandwidth at the
-// half-power points is roughly MIC_NOTCH_HZ / MIC_NOTCH_Q, so 475 Hz here.
-// Widen it (lower Q) if the ring wanders, deepen it (more dB) if it holds
-// still and persists.
+// Second section, the aimed one.  Q sets how wide the bucket is — bandwidth
+// at the half-power points is roughly MIC_NOTCH_HZ / MIC_NOTCH_Q, so 317 Hz
+// here, against 475 at the Q of 4 this started on.  Depth at the centre is
+// unchanged; what narrowing buys back is the skirt, and the skirt had been
+// sitting across the presence region either side of the ring.
+//
+// If a ring returns, which side it returns on says which of these to move.
+// Near 1900 means the bucket is too narrow now, so lower the Q back toward 4.
+// Well above 3 kHz means the shelf above is too gentle.
 static const float MIC_NOTCH_HZ = 1900.0f;
 static const float MIC_NOTCH_DB = -18.0f;
-static const float MIC_NOTCH_Q  = 4.0f;
+static const float MIC_NOTCH_Q  = 6.0f;
 
 // Below this the loudest block in an interval is too quiet for its
 // zero-crossing rate to mean anything, and hz= reports nothing rather than a
