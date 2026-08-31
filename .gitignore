@@ -42,3 +42,6 @@
 
 # Arduino CLI build output
 build/
+
+# Seeded design canvases (regenerate from the .dc.html sources + canvas.json)
+design/**/clicky-agent-window.html

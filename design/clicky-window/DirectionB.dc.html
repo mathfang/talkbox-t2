@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #F7F4EF; color: #1A1815; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+    a { color: #D9662F; } a:hover { color: #A8481C; }
+  </style>
+</helmet>
+
+<div style="width: 800px; height: 580px; box-sizing: border-box; padding: 34px 36px; display: flex; flex-direction: column; gap: 18px; background: #F7F4EF;">
+
+  <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.14em; color: #D9662F;">B</div>
+      <h1 style="margin: 0; font-family: 'Bricolage Grotesque', system-ui, sans-serif; font-size: 27px; font-weight: 700; letter-spacing: -0.01em;">Minimap HUD</h1>
+    </div>
+    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: #6E6862; border: 1px solid #DED7CC; border-radius: 999px; padding: 5px 11px; white-space: nowrap;">glanceable, always on</div>
+  </div>
+
+  <p style="margin: 0; font-size: 14.5px; line-height: 1.5; color: #4A453F; max-width: 620px; text-wrap: pretty;">You never leave your screen. A small persistent map sits in the corner showing where every agent is working relative to you — a dot brightens when one needs you, and clicking it flies you there.</p>
+
+  <div style="flex: 1; border-radius: 12px; overflow: hidden; position: relative; background: #23201D; padding: 18px; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px;">
+
+    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8.5px; letter-spacing: 0.12em; color: #D9662F;">YOUR DISPLAY — UNCHANGED</div>
+    <div style="height: 6px; width: 78%; background: #4A443D; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 92%; background: #4A443D; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 61%; background: #3E3933; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 84%; background: #3E3933; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 45%; background: #35312C; border-radius: 3px;"></div>
+
+    <div style="display: flex; align-items: center; gap: 6px; margin-top: 2px;">
+      <svg width="11" height="14" viewBox="0 0 11 14" fill="none"><path d="M1 1L1 11.5L3.9 8.9L5.9 13L7.7 12.2L5.8 8.3L9.6 8.1Z" fill="#D9662F"/></svg>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #8A837B;">you</div>
+    </div>
+
+    <div style="position: absolute; right: 16px; bottom: 16px; width: 178px; background: rgba(18,16,14,0.94); border: 1px solid #3D3833; border-radius: 8px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 8px 26px rgba(0,0,0,0.45);">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; letter-spacing: 0.12em; color: #8A837B;">MAP</div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #1183AC;">4 agents</div>
+      </div>
+      <div style="position: relative; height: 92px; background: #1B1917; border-radius: 5px; overflow: hidden;">
+        <div style="position: absolute; left: 52px; top: 30px; width: 62px; height: 36px; border: 1.5px solid #D9662F; border-radius: 3px; background: rgba(217,102,43,0.12);"></div>
+        <div style="position: absolute; left: 20px; top: 14px; width: 9px; height: 9px; border-radius: 50%; background: #1183AC; box-shadow: 0 0 12px rgba(17,131,172,0.9);"></div>
+        <div style="position: absolute; left: 132px; top: 20px; width: 7px; height: 7px; border-radius: 50%; background: rgba(17,131,172,0.55);"></div>
+        <div style="position: absolute; left: 26px; top: 72px; width: 7px; height: 7px; border-radius: 50%; background: rgba(17,131,172,0.55);"></div>
+        <div style="position: absolute; left: 140px; top: 68px; width: 7px; height: 7px; border-radius: 50%; background: rgba(17,131,172,0.55);"></div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <div style="width: 6px; height: 6px; border-radius: 50%; background: #1183AC;"></div>
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #8A837B;">agent 01 has a question</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px;">
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.14em; color: #8A837B; margin-bottom: 6px;">Why</div>
+      <div style="font-size: 12.5px; line-height: 1.45; color: #3A352F;">Cheapest to ship and the least disruptive — your workflow is untouched. Ambient and continuous rather than something you summon.</div>
+    </div>
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.14em; color: #8A837B; margin-bottom: 6px;">Tradeoff</div>
+      <div style="font-size: 12.5px; line-height: 1.45; color: #3A352F;">A dot is not a colleague. Reads as a game HUD, which cuts against the peer register — and it is one more thing parked in a corner forever.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

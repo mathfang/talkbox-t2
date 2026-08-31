@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #F7F4EF; color: #1A1815; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+    a { color: #D9662F; } a:hover { color: #A8481C; }
+  </style>
+</helmet>
+
+<div style="width: 800px; height: 580px; box-sizing: border-box; padding: 34px 36px; display: flex; flex-direction: column; gap: 18px; background: #F7F4EF;">
+
+  <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.14em; color: #D9662F;">D</div>
+      <h1 style="margin: 0; font-family: 'Bricolage Grotesque', system-ui, sans-serif; font-size: 27px; font-weight: 700; letter-spacing: -0.01em;">Edge Peek</h1>
+    </div>
+    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: #6E6862; border: 1px solid #DED7CC; border-radius: 999px; padding: 5px 11px; white-space: nowrap;">no ui at rest</div>
+  </div>
+
+  <p style="margin: 0; font-size: 14.5px; line-height: 1.5; color: #4A453F; max-width: 620px; text-wrap: pretty;">There is no map and no panel. Agents live just past the bezel and bleed light back in at the edge nearest them. Shove the cursor through that edge and you travel to one.</p>
+
+  <div style="flex: 1; border-radius: 12px; overflow: hidden; position: relative; background: #23201D; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px;">
+
+    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8.5px; letter-spacing: 0.12em; color: #D9662F;">YOUR DISPLAY</div>
+    <div style="height: 6px; width: 70%; background: #4A443D; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 86%; background: #4A443D; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 54%; background: #3E3933; border-radius: 3px;"></div>
+    <div style="height: 6px; width: 76%; background: #35312C; border-radius: 3px;"></div>
+
+    <div style="position: absolute; right: 0; top: 34px; bottom: 34px; width: 26px; background: linear-gradient(to left, rgba(17,131,172,0.85), rgba(17,131,172,0)); border-right: 2px solid #1183AC;"></div>
+    <div style="position: absolute; right: 0; top: 108px; bottom: 108px; width: 44px; background: linear-gradient(to left, rgba(17,131,172,0.5), rgba(17,131,172,0));"></div>
+
+    <div style="position: absolute; left: 0; top: 70px; height: 74px; width: 16px; background: linear-gradient(to right, rgba(17,131,172,0.45), rgba(17,131,172,0)); border-left: 2px solid rgba(17,131,172,0.6);"></div>
+
+    <div style="position: absolute; left: 96px; bottom: 0; width: 120px; height: 14px; background: linear-gradient(to top, rgba(17,131,172,0.35), rgba(17,131,172,0)); border-bottom: 2px solid rgba(17,131,172,0.45);"></div>
+
+    <div style="position: absolute; right: 54px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 8px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8.5px; color: #9FD4E6; letter-spacing: 0.06em;">agent 01 →</div>
+      <svg width="11" height="14" viewBox="0 0 11 14" fill="none"><path d="M1 1L1 11.5L3.9 8.9L5.9 13L7.7 12.2L5.8 8.3L9.6 8.1Z" fill="#D9662F"/></svg>
+    </div>
+
+    <div style="position: absolute; left: 20px; bottom: 18px; font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #6E6862; letter-spacing: 0.08em;">3 agents beyond the edges</div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px;">
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.14em; color: #8A837B; margin-bottom: 6px;">Why</div>
+      <div style="font-size: 12.5px; line-height: 1.45; color: #3A352F;">Zero permanent chrome, and the signal is peripheral rather than demanding — brightness carries urgency the way your talkbox pulse does.</div>
+    </div>
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.14em; color: #8A837B; margin-bottom: 6px;">Tradeoff</div>
+      <div style="font-size: 12.5px; line-height: 1.45; color: #3A352F;">Four edges means roughly four agents. Fights every real screen edge — Dock, menu bar, second monitor — and encodes direction but never detail.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

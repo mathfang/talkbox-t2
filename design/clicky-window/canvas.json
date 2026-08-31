@@ -1,0 +1,19 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",       "x": 0,    "y": 0,   "w": 800, "h": 580, "title": "A · Zoom-Out Canvas" },
+    { "file": "DirectionB.dc.html", "x": 880,  "y": 0,   "w": 800, "h": 580, "title": "B · Minimap HUD" },
+    { "file": "DirectionC.dc.html", "x": 1760, "y": 0,   "w": 800, "h": 580, "title": "C · The Control Room" },
+    { "file": "DirectionD.dc.html", "x": 0,    "y": 700, "w": 800, "h": 580, "title": "D · Edge Peek" },
+    { "file": "DirectionE.dc.html", "x": 880,  "y": 700, "w": 800, "h": 580, "title": "E · The Table" }
+  ],
+  "annotations": [
+    {
+      "id": "brief",
+      "x": 1760,
+      "y": 700,
+      "w": 720,
+      "text": "THE PROBLEM\nClicky spawns agents that work outside your display. How do you perceive them, and get to them?\n\nJUDGE AGAINST THESE, NOT VIBES\n1. Ambient and continuous — not something you summon.\n2. Peer collaborator. Equal, conversational.\n3. Voice only, no text.\n4. Control passes automatically by whose turn the task implies.\n5. You can point but not click while an agent has control.\n6. Needs one WOW moment — the last demo wasn't flashy enough.\n\nCOLOUR KEY\nOrange = you. Sky = an agent.\n\nOPEN QUESTION\nHow many agents at once? Under 4 keeps D and E alive. Past 8, only C survives."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

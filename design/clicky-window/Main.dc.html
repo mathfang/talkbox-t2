@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+  <style>
+    body { margin: 0; background: #F7F4EF; color: #1A1815; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+    a { color: #D9662F; } a:hover { color: #A8481C; }
+  </style>
+</helmet>
+
+<div style="width: 800px; height: 580px; box-sizing: border-box; padding: 34px 36px; display: flex; flex-direction: column; gap: 18px; background: #F7F4EF;">
+
+  <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.14em; color: #D9662F;">A</div>
+      <h1 style="margin: 0; font-family: 'Bricolage Grotesque', system-ui, sans-serif; font-size: 27px; font-weight: 700; letter-spacing: -0.01em;">Zoom-Out Canvas</h1>
+    </div>
+    <div style="font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: #6E6862; border: 1px solid #DED7CC; border-radius: 999px; padding: 5px 11px; white-space: nowrap;">one continuous space</div>
+  </div>
+
+  <p style="margin: 0; font-size: 14.5px; line-height: 1.5; color: #4A453F; max-width: 620px; text-wrap: pretty;">Your display is one tile on a much larger desktop. A zoom gesture pulls the whole OS back and the agents are simply <em>there</em> — neighbours you were always sitting inside of, not a panel you opened.</p>
+
+  <div style="flex: 1; border-radius: 12px; overflow: hidden; position: relative; background: #23201D; display: flex; align-items: center; gap: 14px; padding: 18px; box-sizing: border-box;">
+
+    <div style="display: flex; flex-direction: column; gap: 10px; width: 122px;">
+      <div style="height: 88px; box-sizing: border-box; background: #2A2723; border: 1px solid rgba(17,131,172,0.5); border-radius: 6px; padding: 9px; display: flex; flex-direction: column; gap: 5px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; letter-spacing: 0.1em; color: #1183AC;">AGENT 01</div>
+        <div style="height: 3px; background: #3D3833; border-radius: 2px;"></div>
+        <div style="height: 3px; width: 70%; background: #3D3833; border-radius: 2px;"></div>
+        <div style="height: 3px; width: 84%; background: #3D3833; border-radius: 2px;"></div>
+        <div style="width: 6px; height: 6px; border-radius: 50%; background: #1183AC; margin-top: 2px;"></div>
+      </div>
+      <div style="height: 88px; box-sizing: border-box; background: #2A2723; border: 1px solid rgba(17,131,172,0.28); border-radius: 6px; padding: 9px; display: flex; flex-direction: column; gap: 5px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; letter-spacing: 0.1em; color: rgba(17,131,172,0.7);">AGENT 02</div>
+        <div style="height: 3px; width: 60%; background: #35312C; border-radius: 2px;"></div>
+        <div style="height: 3px; width: 88%; background: #35312C; border-radius: 2px;"></div>
+      </div>
+    </div>
+
+    <div style="flex: 1; align-self: stretch; display: flex; align-items: center; justify-content: center; position: relative;">
+      <div style="position: absolute; inset: -6px; border: 1px dashed rgba(217,102,43,0.4); border-radius: 12px;"></div>
+      <div style="width: 100%; height: 100%; box-sizing: border-box; background: #302B26; border: 2px solid #D9662F; border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 7px; box-shadow: 0 0 42px rgba(217,102,43,0.22);">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8.5px; letter-spacing: 0.12em; color: #D9662F;">YOUR DISPLAY</div>
+        <div style="height: 5px; background: #4A443D; border-radius: 3px;"></div>
+        <div style="height: 5px; width: 82%; background: #4A443D; border-radius: 3px;"></div>
+        <div style="height: 5px; width: 64%; background: #4A443D; border-radius: 3px;"></div>
+        <div style="height: 5px; width: 74%; background: #3E3933; border-radius: 3px;"></div>
+        <div style="margin-top: auto; display: flex; align-items: center; gap: 6px;">
+          <svg width="11" height="14" viewBox="0 0 11 14" fill="none"><path d="M1 1L1 11.5L3.9 8.9L5.9 13L7.7 12.2L5.8 8.3L9.6 8.1Z" fill="#D9662F"/></svg>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; color: #8A837B;">you</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px; width: 122px;">
+      <div style="height: 88px; box-sizing: border-box; background: #2A2723; border: 1px solid rgba(17,131,172,0.28); border-radius: 6px; padding: 9px; display: flex; flex-direction: column; gap: 5px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; letter-spacing: 0.1em; color: rgba(17,131,172,0.7);">AGENT 03</div>
+        <div style="height: 3px; width: 78%; background: #35312C; border-radius: 2px;"></div>
+        <div style="height: 3px; width: 52%; background: #35312C; border-radius: 2px;"></div>
+      </div>
+      <div style="height: 88px; box-sizing: border-box; background: #2A2723; border: 1px solid rgba(17,131,172,0.5); border-radius: 6px; padding: 9px; display: flex; flex-direction: column; gap: 5px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 8px; letter-spacing: 0.1em; color: #1183AC;">AGENT 04</div>
+        <div style="height: 3px; background: #3D3833; border-radius: 2px;"></div>
+        <div style="height: 3px; width: 66%; background: #3D3833; border-radius: 2px;"></div>
+        <div style="width: 6px; height: 6px; border-radius: 50%; background: #1183AC; margin-top: 2px;"></div>
+      </div>
+    </div>
+
+    <div style="position: absolute; top: 12px; right: 14px; font-family: 'IBM Plex Mono', monospace; font-size: 9px; letter-spacing: 0.08em; color: #6E6862; border: 1px solid #3D3833; border-radius: 5px; padding: 4px 8px;">⌘ −  zoom out</div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px;">
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.14em; color: #8A837B; margin-bottom: 6px;">Why</div>
+      <div style="font-size: 12.5px; line-height: 1.45; color: #3A352F;">No new window to manage, and no metaphor to learn. The agents are ambient and permanent — you zoom, you see them, they were never hidden.</div>
+    </div>
+    <div>
+      <div style="font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.14em; color: #8A837B; margin-bottom: 6px;">Tradeoff</div>
+      <div style="font-size: 12.5px; line-height: 1.45; color: #3A352F;">The most expensive to build — it fights macOS Spaces for the whole desktop. Zoomed out, no single agent is legible enough to actually work with.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>
