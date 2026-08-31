@@ -46,16 +46,19 @@ public struct Agent: Identifiable, Equatable {
 }
 
 public enum Mock {
+    /// One agent per compass direction, deliberately. Edge-based navigation
+    /// buckets by dominant axis, so two agents sharing a dominant axis would
+    /// make one of them unreachable and stack their rooms on top of each other.
     public static let agents: [Agent] = [
         Agent(id: 1, app: "Xcode", task: "fixing the build",
-              status: .working, spot: CGPoint(x: 1.25, y: -0.55)),
+              status: .working, spot: CGPoint(x: 1.30, y: -0.28)),
         Agent(id: 2, app: "Gmail", task: "drafting the reply",
-              status: .needsYou, spot: CGPoint(x: 1.30, y: 0.30),
+              status: .needsYou, spot: CGPoint(x: 0.34, y: 1.20),
               line: "stuck — gmail isn't connected. can you connect it?"),
         Agent(id: 3, app: "Sheets", task: "reconciling the numbers",
-              status: .working, spot: CGPoint(x: -1.28, y: 0.42)),
+              status: .working, spot: CGPoint(x: -1.28, y: 0.30)),
         Agent(id: 4, app: "Figma", task: "waiting on you",
-              status: .idle, spot: CGPoint(x: -1.20, y: -0.60)),
+              status: .idle, spot: CGPoint(x: -0.30, y: -1.18)),
     ]
 }
 

@@ -5,15 +5,18 @@ import ClickyKit
 // The ball at the notch.
 //
 // At rest it is a small object tucked against the notch, carrying only the
-// fleet's pulse. Swipe down over it (or press ⌥Space) and it grows into a
-// minimap of where every agent is working relative to your display.
+// fleet's pulse. Swipe over it (or click it, or press ⌥Space) and it grows into
+// a minimap of where every agent is working relative to your display.
+//
+// Runs as an .accessory app: no Dock icon, no menu bar, never steals focus.
+// Quit it from the terminal it was launched from (ctrl-C).
 //
 // HONEST LIMIT: macOS does not expose Mission Control / Exposé state to a
 // normal app. Hooking the real Exposé gesture needs private API or an
-// Accessibility-trusted event tap. So the triggers here are: hover the notch,
-// swipe over it, click it, or ⌥Space (⌥Space only while this app is focused —
-// keyboard monitors are the one kind that would need Accessibility). Hover and
-// swipe work globally. Everything else about the interaction is real.
+// Accessibility-trusted event tap. So the triggers are hover, swipe, click and
+// ⌥Space. Hover, swipe and click are watched globally and work whatever app is
+// focused; only the hotkey needs focus, because a global *keyboard* tap is the
+// one kind that would require Accessibility.
 
 final class NotchModel: ObservableObject {
     enum Mode: Equatable { case idle, peek, open }
@@ -27,10 +30,15 @@ final class NotchModel: ObservableObject {
     var hasRealNotch = false
 
     private let gestures = GestureMonitor()
-    private var swipeCharge: CGFloat = 0
+    private var openCharge: CGFloat = 0
+    private var closeCharge: CGFloat = 0
+    private var hoverWork: DispatchWorkItem?
+    private var screenObserver: Any?
 
-    /// Window size per mode. The window is resized rather than kept large and
-    /// transparent, so a collapsed ball never eats clicks meant for your desktop.
+    /// Tight to the notch. A generous zone here sits exactly where the cursor
+    /// passes on its way to the menu bar, and the panel flickers all day.
+    private var hotZone: CGRect { anchor.insetBy(dx: -24, dy: -6) }
+
     func size(for mode: Mode) -> CGSize {
         switch mode {
         case .idle: return CGSize(width: max(anchor.width, 160) + 80, height: anchor.height + 26)
@@ -42,18 +50,47 @@ final class NotchModel: ObservableObject {
     func start() {
         gestures.onMouseMoved = { [weak self] p in
             guard let self else { return }
-            let hot = self.anchor.insetBy(dx: -70, dy: -10)
-            let inside = hot.contains(p)
-            if inside, self.mode == .idle { self.set(.peek) }
-            else if !inside, self.mode == .peek { self.set(.idle) }
+            let inside = self.hotZone.contains(p)
+
+            if inside, self.mode == .idle {
+                // A short dwell so brushing past the notch does nothing.
+                self.hoverWork?.cancel()
+                let w = DispatchWorkItem { [weak self] in
+                    guard let self, self.mode == .idle,
+                          self.hotZone.contains(NSEvent.mouseLocation) else { return }
+                    self.set(.peek)
+                }
+                self.hoverWork = w
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: w)
+            } else if !inside {
+                self.hoverWork?.cancel()
+                if self.mode == .peek { self.set(.idle) }
+            }
         }
 
-        gestures.onScroll = { [weak self] _, dy, phase, _ in
-            guard let self, self.mode != .open else { return }
-            guard self.anchor.insetBy(dx: -70, dy: -10).contains(NSEvent.mouseLocation) else { return }
-            self.swipeCharge += abs(dy)
-            if self.swipeCharge > 40 { self.swipeCharge = 0; self.set(.open) }
-            if phase == .ended { self.swipeCharge = 0 }
+        gestures.onScroll = { [weak self] s in
+            guard let self, !s.isMomentum else { return }
+
+            if self.mode == .open {
+                // Swiping away closes it. Without this the panel is a dead end
+                // for anyone who has clicked back into their real work.
+                self.closeCharge += abs(s.dy)
+                if self.closeCharge > 90 { self.closeCharge = 0; self.set(.idle) }
+                if s.ended { self.closeCharge = 0 }
+                return
+            }
+
+            guard self.hotZone.contains(NSEvent.mouseLocation) else { return }
+            self.openCharge += abs(s.dy)
+            if self.openCharge > 110 { self.openCharge = 0; self.set(.open) }
+            if s.ended { self.openCharge = 0 }
+        }
+
+        // Clicking anywhere outside the panel dismisses it, like any popover.
+        gestures.onMouseDown = { [weak self] p in
+            guard let self, self.mode == .open else { return }
+            if let frame = self.window?.frame, frame.contains(p) { return }
+            self.set(.idle)
         }
 
         gestures.onKeyDown = { [weak self] e in
@@ -66,7 +103,22 @@ final class NotchModel: ObservableObject {
             return false
         }
 
-        gestures.start(watchMouseGlobally: true, watchScrollGlobally: true)
+        gestures.start(watchMouseGlobally: true,
+                       watchScrollGlobally: true,
+                       watchClicksGlobally: true)
+
+        // Docking or undocking a display moves the notch out from under us.
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+            let (rect, real) = Notch.anchor(on: screen)
+            self.anchor = rect
+            self.hasRealNotch = real
+            self.layout(for: self.mode)
+        }
 
         withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) {
             breathing = true
@@ -75,8 +127,7 @@ final class NotchModel: ObservableObject {
 
     func set(_ next: Mode) {
         guard next != mode else { return }
-        // Opening is the earned moment, so it gets the springy curve; closing
-        // and the small hover step stay calm.
+        // Opening is the earned moment. Closing and the hover step stay calm.
         withAnimation(next == .open ? Tok.arrive : Tok.calm) { mode = next }
         layout(for: next)
     }
@@ -100,23 +151,25 @@ struct Ball: View {
     private var urgent: Bool { m.fleet.needsYou > 0 }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: urgent
-                            ? [Tok.you.opacity(0.95), Tok.you.opacity(0.35)]
-                            : [Tok.agent.opacity(0.9), Tok.agent.opacity(0.28)],
-                        center: .init(x: 0.35, y: 0.3),
-                        startRadius: 1,
-                        endRadius: 22
-                    )
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: urgent
+                        ? [Tok.you, Tok.you.opacity(0.45)]
+                        : [Tok.agent.opacity(0.9), Tok.agent.opacity(0.28)],
+                    center: .init(x: 0.35, y: 0.3),
+                    startRadius: 1,
+                    endRadius: 22
                 )
-                .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 0.5))
-                .shadow(color: (urgent ? Tok.you : Tok.agent).opacity(m.breathing ? 0.75 : 0.3),
-                        radius: m.breathing ? 11 : 5)
-        }
-        .frame(width: 20, height: 20)
+            )
+            .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 0.5))
+            // An agent waiting on you is the one thing allowed to be loud.
+            .shadow(color: (urgent ? Tok.you : Tok.agent)
+                        .opacity(m.breathing ? (urgent ? 1.0 : 0.6) : 0.25),
+                    radius: m.breathing ? (urgent ? 20 : 9) : 4)
+            .scaleEffect(urgent && m.breathing ? 1.18 : 1.0)
+            .animation(urgent ? Tok.alert : Tok.calm, value: m.breathing)
+            .frame(width: 20, height: 20)
     }
 }
 
@@ -128,8 +181,6 @@ struct Minimap: View {
     var body: some View {
         GeometryReader { geo in
             let box = geo.size
-            // Your display, drawn small and centred; agents sit around it in
-            // the same canvas coordinates every other prototype uses.
             let dw = box.width * 0.30
             let dh = dw * 0.62
 
@@ -157,17 +208,28 @@ struct AgentDot: View {
     var agent: Agent
     var breathing: Bool
 
+    private var urgent: Bool { agent.status == .needsYou }
+
     var body: some View {
-        VStack(spacing: 4) {
-            Circle()
-                .fill(agent.status.tint)
-                .frame(width: agent.status == .needsYou ? 10 : 7,
-                       height: agent.status == .needsYou ? 10 : 7)
-                .shadow(color: agent.status.tint.opacity(breathing ? 0.9 : 0.4),
-                        radius: agent.status == .idle ? 0 : 6)
+        VStack(spacing: 5) {
+            ZStack {
+                if urgent {
+                    Circle()
+                        .stroke(Tok.you.opacity(breathing ? 0.0 : 0.75), lineWidth: 2)
+                        .frame(width: breathing ? 34 : 12, height: breathing ? 34 : 12)
+                }
+                Circle()
+                    .fill(agent.status.tint)
+                    .frame(width: urgent ? 13 : 7, height: urgent ? 13 : 7)
+                    .shadow(color: agent.status.tint.opacity(breathing ? 0.95 : 0.4),
+                            radius: agent.status == .idle ? 0 : (urgent ? 14 : 6))
+            }
+            .frame(width: 34, height: 34)
+            .animation(urgent ? Tok.alert : Tok.calm, value: breathing)
+
             Text(agent.app)
                 .font(Tok.mono(8))
-                .foregroundStyle(Tok.labelDim)
+                .foregroundStyle(urgent ? Tok.label : Tok.labelDim)
         }
     }
 }
@@ -179,13 +241,10 @@ struct NotchView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            switch m.mode {
-            case .idle:
-                collapsed
-            case .peek:
-                collapsed
-            case .open:
+            if m.mode == .open {
                 panel
+            } else {
+                collapsed
             }
             Spacer(minLength: 0)
         }
@@ -209,9 +268,7 @@ struct NotchView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: max(m.anchor.height, 30))
-        .background(
-            Capsule().fill(Color.black.opacity(m.mode == .peek ? 0.55 : 0.0))
-        )
+        .background(Capsule().fill(Color.black.opacity(m.mode == .peek ? 0.55 : 0.0)))
         .contentShape(Capsule())
         .onTapGesture { m.toggleOpen() }
         .padding(.top, m.hasRealNotch ? 0 : 2)
@@ -225,9 +282,9 @@ struct NotchView: View {
                     .font(Tok.ui(12, .semibold))
                     .foregroundStyle(Tok.label)
                 Spacer()
-                Text("swipe up or esc")
+                Text("swipe away, click out, or esc")
                     .font(Tok.mono(9))
-                    .foregroundStyle(Tok.labelDim)
+                    .foregroundStyle(Color.white.opacity(Tok.hintIdle))
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
@@ -247,9 +304,9 @@ struct NotchView: View {
                         .lineLimit(2)
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 14)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(Tok.you.opacity(0.18))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -268,8 +325,12 @@ struct NotchView: View {
 
 let model = NotchModel()
 
-runClicky(appName: "Notch Ball") {
-    let screen = NSScreen.main ?? NSScreen.screens[0]
+runClicky(appName: "Notch Ball", policy: .accessory) {
+    guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+        FileHandle.standardError.write(
+            Data("Notch Ball needs at least one attached display.\n".utf8))
+        exit(1)
+    }
     let (rect, real) = Notch.anchor(on: screen)
     model.anchor = rect
     model.hasRealNotch = real

@@ -17,28 +17,38 @@ swift build
 swift run ZoomCanvas
 ```
 
-Quit with ⌘Q. `NotchBall` has no window in the normal sense — look at your notch.
+Quit `ZoomCanvas` / `EdgePeek` with ⌘Q. `NotchBall` runs as an accessory app —
+no Dock icon, no menu bar, never takes focus — so quit it with ctrl-C in the
+terminal you launched it from. Look at your notch to find it.
 
 ## Controls
 
 **ZoomCanvas**
-- Pinch out / in on the trackpad — tracks your fingers directly, no easing
+- **Squeeze** two fingers together to step back and reveal the agents. Spreading
+  them returns home — at rest you are already at maximum zoom, so spreading does
+  nothing, which is why the hint says squeeze
 - Two-finger scroll to pan while zoomed out
 - Two-finger double-tap (smart zoom) or Space to toggle overview
-- `-` overview, `=` home, `esc` home
+- `−` overview, `=` home, `esc` home
 - Click an agent to fly to it
 
 **EdgePeek**
 - Two-finger push toward an edge. Keep pushing to commit; let go early and it
   rubber-bands back — the same contract as Safari's back-swipe
-- Arrow keys travel in a direction; `esc` comes home
-- Edge glow brightness is agent state, and it stretches as you push
+- One agent per direction: Xcode right, Gmail down, Sheets left, Figma up
+- Arrow keys travel; press again (or `esc`) to come home
+- Edge glow is agent state, and it stretches as you push. The agent that needs
+  you gets a wide wash, not a brighter hairline
+- Works with a plain scroll wheel too — a wheel sends no gesture phases, so the
+  end of the gesture is synthesised after 150ms of quiet
 
 **NotchBall**
-- Hover the notch — peeks, shows the count
+- Hover the notch for ~0.2s — peeks, shows the count
 - Swipe (two-finger scroll) over the notch — opens the minimap
 - Click the ball — toggles
-- ⌥Space — toggles, but only while this app is focused
+- To close: swipe away, click anywhere outside, or `esc`
+- ⌥Space toggles, but only while this app is focused — a global *keyboard* tap
+  is the one kind that would need Accessibility permission
 
 ## Colour rule
 
@@ -64,13 +74,19 @@ require Accessibility, which is why ⌥Space is focus-only.
 
 ## Gotchas
 
-- Both `ZoomCanvas` and `EdgePeek` swallow scroll and pinch app-wide via
-  `NSEvent` local monitors. Fine for a single-surface prototype, wrong for a
-  real app — scope it to a view before this becomes product code.
+- All three swallow scroll and pinch app-wide via `NSEvent` monitors. Fine for a
+  single-surface prototype, wrong for a real app — scope it to a view before
+  this becomes product code.
 - Scroll direction assumes macOS natural scrolling. If travel feels inverted,
-  flip the two signs in `PeekModel.onScroll`.
+  flip the two signs in `PeekModel`'s `onScroll`.
+- `ZoomCanvas`'s core gesture is trackpad-only — pinch cannot be produced by any
+  mouse. The `−` / `=` keys are the fallback and are shown in the on-screen hint.
 - `swift run` builds an executable with no bundle, so there is no Dock icon or
   code signature. That is expected.
+- **Not compiled.** These were written in a Linux container with no Swift
+  toolchain and no macOS SDK, so `swift build` has never run against them. They
+  were reviewed for API availability, type errors and launch crashes, but the
+  first real compile is on your Mac.
 
 ## Layout
 

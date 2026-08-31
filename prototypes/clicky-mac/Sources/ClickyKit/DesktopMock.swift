@@ -71,6 +71,8 @@ public struct AgentTile: View {
         self.compact = compact
     }
 
+    private var urgent: Bool { agent.status == .needsYou }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             MacWindow(title: agent.app,
@@ -78,6 +80,14 @@ public struct AgentTile: View {
                       lines: [0.9, 0.6, 0.75],
                       dimmed: agent.status == .idle)
                 .frame(height: compact ? 84 : 122)
+                // The one agent waiting on you gets a wash of colour, not a
+                // 1px stroke — otherwise "needs you" reads the same as idle.
+                .background(
+                    RoundedRectangle(cornerRadius: Tok.tileRadius + 6, style: .continuous)
+                        .fill(Tok.you.opacity(urgent ? 0.30 : 0))
+                        .blur(radius: 18)
+                        .padding(-14)
+                )
 
             HStack(spacing: 6) {
                 Circle()

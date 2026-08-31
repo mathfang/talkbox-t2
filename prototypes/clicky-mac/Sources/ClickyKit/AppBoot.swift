@@ -13,15 +13,26 @@ public final class ClickyDelegate: NSObject, NSApplicationDelegate {
         self.makeWindow = makeWindow
     }
 
+    /// An accessory app must not steal focus when it launches.
+    public var takesFocus = true
+
     public func applicationDidFinishLaunching(_ note: Notification) {
         let w = makeWindow()
         window = w
-        w.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if takesFocus {
+            w.makeKeyAndOrderFront(nil)
+            if #available(macOS 14.0, *) {
+                NSApp.activate()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        } else {
+            w.orderFrontRegardless()
+        }
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
-        true
+        takesFocus
     }
 }
 
@@ -45,12 +56,20 @@ public func clickyMainMenu(appName: String) -> NSMenu {
     return main
 }
 
-public func runClicky(appName: String, makeWindow: @escaping () -> NSWindow) -> Never {
+/// `policy` matters: `.regular` is right for a windowed prototype, but an
+/// ambient notch companion must be `.accessory` or launching it yanks focus and
+/// puts an icon in the Dock and Cmd-Tab — the opposite of ambient.
+public func runClicky(appName: String,
+                      policy: NSApplication.ActivationPolicy = .regular,
+                      makeWindow: @escaping () -> NSWindow) -> Never {
     let app = NSApplication.shared
-    app.setActivationPolicy(.regular)
-    app.mainMenu = clickyMainMenu(appName: appName)
+    app.setActivationPolicy(policy)
+    if policy == .regular {
+        app.mainMenu = clickyMainMenu(appName: appName)
+    }
 
     let delegate = ClickyDelegate(makeWindow: makeWindow)
+    delegate.takesFocus = policy == .regular
     retainedDelegate = delegate
     app.delegate = delegate
 

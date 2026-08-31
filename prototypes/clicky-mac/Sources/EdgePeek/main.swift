@@ -13,10 +13,12 @@ import ClickyKit
 /// How far you have to push before you commit to travelling.
 private let commitDistance: CGFloat = 150
 
-enum Edge {
+/// Named Bezel rather than Edge on purpose: SwiftUI already has an `Edge`, and
+/// shadowing it breaks any `.transition(.move(edge:))` added to this file later.
+enum Bezel: CaseIterable {
     case left, right, top, bottom
 
-    /// Unit vector pointing out of that edge.
+    /// Unit vector pointing out of that bezel.
     var vector: CGSize {
         switch self {
         case .left:   return CGSize(width: -1, height: 0)
@@ -26,7 +28,7 @@ enum Edge {
         }
     }
 
-    static func nearest(for spot: CGPoint) -> Edge {
+    static func nearest(for spot: CGPoint) -> Bezel {
         if abs(spot.x) >= abs(spot.y) {
             return spot.x >= 0 ? .right : .left
         }
@@ -43,33 +45,40 @@ final class PeekModel: ObservableObject {
 
     let fleet = Fleet()
     private let gestures = GestureMonitor()
+    private let wheelEnd = WheelEndDetector()
 
     func start() {
-        gestures.onScroll = { [weak self] dx, dy, phase, precise in
+        gestures.onScroll = { [weak self] s in
             guard let self else { return }
-            let gain: CGFloat = precise ? 1.0 : 6.0
 
+            // Momentum after a commit would keep nudging the camera forever.
+            if s.isMomentum { return }
+            if s.began { self.push = .zero }
+
+            let gain: CGFloat = s.precise ? 1.0 : 6.0
             // Natural scrolling: fingers left means "take me rightward".
-            self.push.width -= dx * gain
-            self.push.height -= dy * gain
+            self.push.width -= s.dx * gain
+            self.push.height -= s.dy * gain
 
-            if phase == .ended || phase == .cancelled {
+            if s.ended {
+                self.wheelEnd.cancel()
                 self.release()
+            } else if !s.precise {
+                // A scroll wheel never sends phases, so synthesise the end.
+                self.wheelEnd.bump()
             }
         }
 
+        wheelEnd.onEnd = { [weak self] in self?.release() }
+
         gestures.onKeyDown = { [weak self] e in
             guard let self else { return false }
-            if e.keyCode == 53 {                       // esc
-                self.goHome()
-                return true
-            }
-            guard self.visiting == nil else { return false }
+            if e.keyCode == 53 { self.goHome(); return true }   // esc
             switch e.keyCode {
-            case 124: self.travel(to: .right); return true   // →
-            case 123: self.travel(to: .left);  return true   // ←
-            case 125: self.travel(to: .bottom); return true  // ↓
-            case 126: self.travel(to: .top);   return true   // ↑
+            case 124: self.step(.right);  return true           // →
+            case 123: self.step(.left);   return true           // ←
+            case 125: self.step(.bottom); return true           // ↓
+            case 126: self.step(.top);    return true           // ↑
             default: return false
             }
         }
@@ -81,7 +90,13 @@ final class PeekModel: ObservableObject {
         }
     }
 
-    /// Fingers lifted: either commit to the edge you were pushing toward, or
+    /// Arrow keys: travel when home, come home when visiting. Previously they
+    /// silently did nothing once you had arrived somewhere.
+    private func step(_ bezel: Bezel) {
+        if visiting == nil { travel(to: bezel) } else { goHome() }
+    }
+
+    /// Fingers lifted: either commit to the bezel you were pushing toward, or
     /// rubber-band home.
     private func release() {
         let far = max(abs(push.width), abs(push.height))
@@ -90,19 +105,16 @@ final class PeekModel: ObservableObject {
             return
         }
 
-        if visiting != nil {
-            goHome()
-            return
-        }
+        if visiting != nil { goHome(); return }
 
-        let edge: Edge = abs(push.width) >= abs(push.height)
+        let bezel: Bezel = abs(push.width) >= abs(push.height)
             ? (push.width > 0 ? .right : .left)
             : (push.height > 0 ? .bottom : .top)
-        travel(to: edge)
+        travel(to: bezel)
     }
 
-    func travel(to edge: Edge) {
-        guard let target = agent(on: edge) else {
+    func travel(to bezel: Bezel) {
+        guard let target = agent(on: bezel) else {
             // Nothing out that way. Bounce rather than silently ignoring —
             // the absence of an agent is information too.
             withAnimation(Tok.calm) { push = .zero }
@@ -121,14 +133,14 @@ final class PeekModel: ObservableObject {
         }
     }
 
-    func agent(on edge: Edge) -> Agent? {
-        fleet.agents.first { Edge.nearest(for: $0.spot) == edge }
+    func agent(on bezel: Bezel) -> Agent? {
+        fleet.agents.first { Bezel.nearest(for: $0.spot) == bezel }
     }
 
     /// 0...1 — how close the current push is to committing.
-    func pressure(on edge: Edge) -> CGFloat {
+    func pressure(on bezel: Bezel) -> CGFloat {
         let along: CGFloat
-        switch edge {
+        switch bezel {
         case .left:   along = -push.width
         case .right:  along = push.width
         case .top:    along = -push.height
@@ -140,25 +152,35 @@ final class PeekModel: ObservableObject {
 
 // MARK: - Views
 
-struct EdgeGlow: View {
-    var edge: Edge
+struct BezelGlow: View {
+    var bezel: Bezel
     var agent: Agent
     var pressure: CGFloat
     var breathing: Bool
 
+    private var urgent: Bool { agent.status == .needsYou }
+
+    /// An agent waiting on you gets real area, not a slightly fatter hairline.
+    /// This is the one loud thing on screen.
     private var thickness: CGFloat {
-        let base: CGFloat = agent.status == .needsYou ? 30 : 18
-        let breath: CGFloat = breathing && agent.status != .idle ? 8 : 0
-        return base + breath + pressure * 90
+        let base: CGFloat = urgent ? 96 : (agent.status == .idle ? 12 : 20)
+        let breath: CGFloat = breathing ? (urgent ? 34 : 6) : 0
+        return base + breath + pressure * 110
     }
 
-    private var tint: Color { agent.status.tint }
+    private var strength: Double {
+        switch agent.status {
+        case .needsYou: return breathing ? 0.95 : 0.62
+        case .working:  return 0.60
+        case .idle:     return 0.26
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
-            let horizontal = edge == .left || edge == .right
+            let horizontal = bezel == .left || bezel == .right
             LinearGradient(
-                colors: [tint.opacity(agent.status == .idle ? 0.30 : 0.85), tint.opacity(0)],
+                colors: [agent.status.tint.opacity(strength), agent.status.tint.opacity(0)],
                 startPoint: startPoint,
                 endPoint: endPoint
             )
@@ -167,16 +189,18 @@ struct EdgeGlow: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
             .overlay(alignment: alignment) {
                 Rectangle()
-                    .fill(tint)
-                    .frame(width: horizontal ? 2 : nil, height: horizontal ? nil : 2)
+                    .fill(agent.status.tint)
+                    .frame(width: horizontal ? (urgent ? 4 : 2) : nil,
+                           height: horizontal ? nil : (urgent ? 4 : 2))
                     .opacity(0.5 + pressure * 0.5)
             }
         }
+        .animation(urgent ? Tok.alert : Tok.calm, value: breathing)
         .allowsHitTesting(false)
     }
 
     private var alignment: Alignment {
-        switch edge {
+        switch bezel {
         case .left: return .leading
         case .right: return .trailing
         case .top: return .top
@@ -184,7 +208,7 @@ struct EdgeGlow: View {
         }
     }
     private var startPoint: UnitPoint {
-        switch edge {
+        switch bezel {
         case .left: return .leading
         case .right: return .trailing
         case .top: return .top
@@ -192,7 +216,7 @@ struct EdgeGlow: View {
         }
     }
     private var endPoint: UnitPoint {
-        switch edge {
+        switch bezel {
         case .left: return .trailing
         case .right: return .leading
         case .top: return .bottom
@@ -240,16 +264,16 @@ struct EdgePeekView: View {
                 ZStack {
                     DisplayMock()
                         .frame(width: size.width, height: size.height)
-                        .overlay(edgeGlows)
+                        .overlay(bezelGlows)
                         .position(x: size.width / 2, y: size.height / 2)
 
                     ForEach(m.fleet.agents) { a in
-                        let e = Edge.nearest(for: a.spot)
+                        let b = Bezel.nearest(for: a.spot)
                         AgentRoom(agent: a)
                             .frame(width: size.width, height: size.height)
                             .position(
-                                x: size.width / 2 + e.vector.width * (size.width + 40),
-                                y: size.height / 2 + e.vector.height * (size.height + 40)
+                                x: size.width / 2 + b.vector.width * (size.width + 40),
+                                y: size.height / 2 + b.vector.height * (size.height + 40)
                             )
                     }
                 }
@@ -267,21 +291,21 @@ struct EdgePeekView: View {
     private func contentOffset(_ size: CGSize) -> CGSize {
         var base = CGSize.zero
         if let v = m.visiting {
-            let e = Edge.nearest(for: v.spot)
-            base = CGSize(width: e.vector.width * (size.width + 40),
-                          height: e.vector.height * (size.height + 40))
+            let b = Bezel.nearest(for: v.spot)
+            base = CGSize(width: b.vector.width * (size.width + 40),
+                          height: b.vector.height * (size.height + 40))
         }
         return CGSize(width: base.width + m.push.width,
                       height: base.height + m.push.height)
     }
 
-    private var edgeGlows: some View {
+    private var bezelGlows: some View {
         ZStack {
             ForEach(m.fleet.agents) { a in
-                let e = Edge.nearest(for: a.spot)
-                EdgeGlow(edge: e, agent: a,
-                         pressure: m.pressure(on: e),
-                         breathing: m.breathing)
+                let b = Bezel.nearest(for: a.spot)
+                BezelGlow(bezel: b, agent: a,
+                          pressure: m.pressure(on: b),
+                          breathing: m.breathing)
             }
         }
         .opacity(m.visiting == nil ? 1 : 0)
@@ -292,11 +316,11 @@ struct EdgePeekView: View {
         VStack {
             Spacer()
             Text(m.visiting == nil
-                 ? "push past an edge to go to an agent"
-                 : "push back, or esc, to come home")
-                .font(Tok.mono(10))
-                .foregroundStyle(Color.white.opacity(0.35))
-                .padding(.bottom, 16)
+                 ? "two-finger push toward an edge — keep pushing to go there"
+                 : "push back, or press esc, to come home")
+                .font(Tok.mono(11))
+                .foregroundStyle(Color.white.opacity(m.visiting == nil ? Tok.hintIdle : Tok.hintActive))
+                .padding(.bottom, 18)
         }
         .allowsHitTesting(false)
     }

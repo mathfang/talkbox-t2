@@ -25,8 +25,17 @@ public enum Tok {
 
     public static let calm = Animation.spring(response: 0.42, dampingFraction: 0.86)
     public static let travel = Animation.spring(response: 0.52, dampingFraction: 0.82)
-    /// Slightly under-damped. Used only where something *arrives*.
-    public static let arrive = Animation.spring(response: 0.50, dampingFraction: 0.72)
+    /// Opening something. Fast and loose enough to read as a different *kind*
+    /// of motion, not the calm spring with the damping nudged.
+    public static let arrive = Animation.spring(response: 0.34, dampingFraction: 0.58)
+    /// An agent has stopped and is waiting on you. The only genuinely loud
+    /// motion in the system — it overshoots, and you are meant to notice it
+    /// from across the room.
+    public static let alert = Animation.spring(response: 0.28, dampingFraction: 0.42)
+
+    /// On-screen instructions. Ambient is not the same thing as illegible.
+    public static let hintIdle: Double = 0.55
+    public static let hintActive: Double = 0.78
 
     // MARK: Metric
 

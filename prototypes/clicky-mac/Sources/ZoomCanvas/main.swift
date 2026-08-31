@@ -19,28 +19,36 @@ private let overviewScale: CGFloat = 0.40
 final class CanvasModel: ObservableObject {
     @Published var scale: CGFloat = maxScale
     @Published var pan: CGSize = .zero
-    @Published var hint: String = ""
 
     let fleet = Fleet()
     private let gestures = GestureMonitor()
-    private var pinchAnchor: CGFloat = 1
+    /// Where the pan was when the pinch started, so the camera can return to
+    /// centre continuously instead of snapping when the fingers lift.
+    private var panAnchor: CGSize = .zero
 
     var zoomedOut: Bool { scale < 0.92 }
 
     func start() {
         gestures.onMagnify = { [weak self] mag, phase in
             guard let self else { return }
-            if phase == .began { self.pinchAnchor = self.scale }
+            if phase == .began { self.panAnchor = self.pan }
             // Direct, unanimated: a pinch should track the fingers exactly.
             self.scale = clamp(self.scale * (1 + mag), minScale, maxScale)
-            if phase == .ended { self.settle() }
+
+            // Ease the pan home as the scale approaches 1, so arriving back at
+            // your own display is one continuous motion.
+            let t = clamp((self.scale - overviewScale) / (maxScale - overviewScale), 0, 1)
+            self.pan = CGSize(width: self.panAnchor.width * (1 - t),
+                              height: self.panAnchor.height * (1 - t))
+
+            if phase == .ended || phase == .cancelled { self.settle() }
         }
 
-        gestures.onScroll = { [weak self] dx, dy, _, precise in
-            guard let self, self.zoomedOut else { return }
-            let gain: CGFloat = precise ? 1.0 : 6.0
-            self.pan.width += dx * gain
-            self.pan.height += dy * gain
+        gestures.onScroll = { [weak self] s in
+            guard let self, self.zoomedOut, !s.isMomentum else { return }
+            let gain: CGFloat = s.precise ? 1.0 : 6.0
+            self.pan.width += s.dx * gain
+            self.pan.height += s.dy * gain
             self.clampPan()
         }
 
@@ -101,9 +109,11 @@ final class CanvasModel: ObservableObject {
         }
     }
 
+    /// Far enough to reach any agent, never far enough to lose your own
+    /// display off the side of the window.
     private func clampPan() {
-        let limit = CGSize(width: canvasSize.width * scale * 0.4,
-                           height: canvasSize.height * scale * 0.4)
+        let limit = CGSize(width: displaySize.width * scale * 1.5,
+                           height: displaySize.height * scale * 1.5)
         pan.width = clamp(pan.width, -limit.width, limit.width)
         pan.height = clamp(pan.height, -limit.height, limit.height)
     }
@@ -159,17 +169,17 @@ struct ZoomCanvasView: View {
             Spacer()
             HStack {
                 Text(m.zoomedOut
-                     ? "pinch in or press esc to go back"
-                     : "\(m.fleet.agents.count) agents beyond this display  ·  pinch out")
-                    .font(Tok.mono(10))
-                    .foregroundStyle(Color.white.opacity(m.zoomedOut ? 0.5 : 0.32))
+                     ? "spread fingers, or press esc, to come back"
+                     : "\(m.fleet.agents.count) agents beyond this display  ·  squeeze to step back  ·  −")
+                    .font(Tok.mono(11))
+                    .foregroundStyle(Color.white.opacity(m.zoomedOut ? Tok.hintActive : Tok.hintIdle))
                 Spacer()
                 if m.fleet.needsYou > 0 && !m.zoomedOut {
                     HStack(spacing: 6) {
                         Circle().fill(Tok.you).frame(width: 6, height: 6)
                         Text("\(m.fleet.needsYou) needs you")
-                            .font(Tok.mono(10))
-                            .foregroundStyle(Color.white.opacity(0.6))
+                            .font(Tok.mono(11))
+                            .foregroundStyle(Color.white.opacity(Tok.hintActive))
                     }
                 }
             }
