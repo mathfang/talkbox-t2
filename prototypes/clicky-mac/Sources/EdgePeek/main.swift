@@ -287,6 +287,10 @@ struct EdgePeekView: View {
 
                 footer
             }
+            // Pin to the window. The agent rooms sit a full window-width
+            // outside, and without an explicit frame the stack sizes to that
+            // content and anchors at AppKit's bottom-left origin.
+            .frame(width: size.width, height: size.height)
             .clipped()
         }
         .ignoresSafeArea()
