@@ -131,10 +131,14 @@ struct ZoomCanvasView: View {
                 .scaleEffect(m.scale)
                 .offset(m.pan)
 
+            edgeHints
             overlay
         }
         .ignoresSafeArea()
-        .onAppear { m.start() }
+        .onAppear {
+            m.start()
+            m.fleet.startLiving()
+        }
     }
 
     private var canvas: some View {
@@ -163,6 +167,44 @@ struct ZoomCanvasView: View {
         }
     }
 
+    /// At 1:1 the agents are off-canvas and therefore invisible, which makes
+    /// the app look empty and the gesture undiscoverable. These are the only
+    /// thing that says "there is something out there" — light leaking in from
+    /// the direction each agent is working, brightest for one that needs you.
+    private var edgeHints: some View {
+        ZStack {
+            ForEach(m.fleet.agents) { a in
+                hintBar(a)
+            }
+        }
+        .opacity(m.zoomedOut ? 0 : 1)
+        .animation(Tok.calm, value: m.zoomedOut)
+        .allowsHitTesting(false)
+        .ignoresSafeArea()
+    }
+
+    private func hintBar(_ a: Agent) -> some View {
+        let horizontal = abs(a.spot.x) >= abs(a.spot.y)
+        let urgent = a.status == .needsYou
+        let align: Alignment = horizontal ? (a.spot.x >= 0 ? .trailing : .leading)
+                                          : (a.spot.y >= 0 ? .bottom : .top)
+        let from: UnitPoint = horizontal ? (a.spot.x >= 0 ? .trailing : .leading)
+                                         : (a.spot.y >= 0 ? .bottom : .top)
+        let to: UnitPoint = horizontal ? (a.spot.x >= 0 ? .leading : .trailing)
+                                       : (a.spot.y >= 0 ? .top : .bottom)
+        let tint = a.status.tint
+        let thickness: CGFloat = urgent ? 54 : (a.status == .idle ? 10 : 20)
+
+        return LinearGradient(
+            colors: [tint.opacity(urgent ? 0.8 : 0.42), tint.opacity(0)],
+            startPoint: from,
+            endPoint: to
+        )
+        .frame(width: horizontal ? thickness : nil,
+               height: horizontal ? nil : thickness)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: align)
+    }
+
     /// Deliberately almost nothing at scale 1 — ambient, not summoned.
     private var overlay: some View {
         VStack {
@@ -170,7 +212,7 @@ struct ZoomCanvasView: View {
             HStack {
                 Text(m.zoomedOut
                      ? "spread fingers, or press esc, to come back"
-                     : "\(m.fleet.agents.count) agents beyond this display  ·  squeeze to step back  ·  −")
+                     : "\(m.fleet.agents.count) agents working past the edges  ·  squeeze two fingers to step back  ·  −")
                     .font(Tok.mono(11))
                     .foregroundStyle(Color.white.opacity(m.zoomedOut ? Tok.hintActive : Tok.hintIdle))
                 Spacer()

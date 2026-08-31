@@ -226,7 +226,10 @@ struct NotchView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onAppear { m.start() }
+        .onAppear {
+            m.start()
+            m.fleet.startLiving()
+        }
     }
 
     /// The orb sits centred on the notch with its top edge behind it, so on a

@@ -60,6 +60,28 @@ public struct MacWindow: View {
     }
 }
 
+/// A pointer, drawn rather than imported so it can be tinted per agent.
+public struct CursorArrow: View {
+    public var color: Color
+    public init(color: Color) { self.color = color }
+
+    public var body: some View {
+        Path { p in
+            p.move(to: CGPoint(x: 0, y: 0))
+            p.addLine(to: CGPoint(x: 0, y: 13.4))
+            p.addLine(to: CGPoint(x: 3.6, y: 10.1))
+            p.addLine(to: CGPoint(x: 6.1, y: 15.2))
+            p.addLine(to: CGPoint(x: 8.3, y: 14.2))
+            p.addLine(to: CGPoint(x: 5.7, y: 9.3))
+            p.addLine(to: CGPoint(x: 10.6, y: 9.1))
+            p.closeSubpath()
+        }
+        .fill(color)
+        .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+        .frame(width: 11, height: 16)
+    }
+}
+
 /// One agent, off-screen, working. Carries its own status ring so the state
 /// reads at a glance rather than from a label.
 public struct AgentTile: View {
@@ -73,21 +95,54 @@ public struct AgentTile: View {
 
     private var urgent: Bool { agent.status == .needsYou }
 
+    /// Lines grow as the agent writes, so the window content changes too.
+    private var liveLines: [CGFloat] {
+        let widths: [CGFloat] = [0.92, 0.64, 0.78, 0.55, 0.7]
+        return Array(widths.prefix(max(2, min(5, agent.written))))
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            MacWindow(title: agent.app,
-                      accent: agent.status.tint,
-                      lines: [0.9, 0.6, 0.75],
-                      dimmed: agent.status == .idle)
-                .frame(height: compact ? 84 : 122)
-                // The one agent waiting on you gets a wash of colour, not a
-                // 1px stroke — otherwise "needs you" reads the same as idle.
-                .background(
-                    RoundedRectangle(cornerRadius: Tok.tileRadius + 6, style: .continuous)
-                        .fill(Tok.you.opacity(urgent ? 0.30 : 0))
-                        .blur(radius: 18)
-                        .padding(-14)
-                )
+            ZStack(alignment: .topLeading) {
+                MacWindow(title: agent.app,
+                          accent: agent.status.tint,
+                          lines: liveLines,
+                          dimmed: agent.status == .idle)
+
+                // Its cursor, actually moving. Without this the whole canvas
+                // reads as a screenshot.
+                if agent.status != .idle {
+                    GeometryReader { geo in
+                        CursorArrow(color: agent.status.tint)
+                            .position(x: geo.size.width * agent.cursor.x,
+                                      y: geo.size.height * agent.cursor.y)
+                            .animation(.easeInOut(duration: 0.75), value: agent.cursor)
+                    }
+                }
+
+                // How far through the task it is.
+                if agent.status == .working {
+                    GeometryReader { geo in
+                        Capsule()
+                            .fill(agent.status.tint.opacity(0.85))
+                            .frame(width: max(2, geo.size.width * agent.progress * 0.82),
+                                   height: 2.5)
+                            .position(x: geo.size.width * 0.09
+                                        + geo.size.width * agent.progress * 0.41,
+                                      y: geo.size.height - 12)
+                            .animation(.linear(duration: 0.85), value: agent.progress)
+                    }
+                }
+            }
+            .frame(height: compact ? 84 : 122)
+            // The one agent waiting on you gets a wash of colour, not a
+            // 1px stroke — otherwise "needs you" reads the same as idle.
+            .background(
+                RoundedRectangle(cornerRadius: Tok.tileRadius + 6, style: .continuous)
+                    .fill(Tok.you.opacity(urgent ? 0.30 : 0))
+                    .blur(radius: 18)
+                    .padding(-14)
+            )
 
             HStack(spacing: 6) {
                 Circle()

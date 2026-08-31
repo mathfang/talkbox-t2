@@ -39,8 +39,14 @@ enum Bezel: CaseIterable {
 final class PeekModel: ObservableObject {
     /// Live finger travel, before commit. Springs back if you let go.
     @Published var push: CGSize = .zero
-    /// nil = you are home.
-    @Published var visiting: Agent?
+    /// nil = you are home. Stored as an id, not a copy: the fleet mutates as
+    /// agents work, and a snapshot would freeze the room you are standing in.
+    @Published var visitingID: Int?
+
+    var visiting: Agent? {
+        guard let id = visitingID else { return nil }
+        return fleet.agents.first { $0.id == id }
+    }
     @Published var breathing = false
 
     let fleet = Fleet()
@@ -93,7 +99,7 @@ final class PeekModel: ObservableObject {
     /// Arrow keys: travel when home, come home when visiting. Previously they
     /// silently did nothing once you had arrived somewhere.
     private func step(_ bezel: Bezel) {
-        if visiting == nil { travel(to: bezel) } else { goHome() }
+        if visitingID == nil { travel(to: bezel) } else { goHome() }
     }
 
     /// Fingers lifted: either commit to the bezel you were pushing toward, or
@@ -105,7 +111,7 @@ final class PeekModel: ObservableObject {
             return
         }
 
-        if visiting != nil { goHome(); return }
+        if visitingID != nil { goHome(); return }
 
         let bezel: Bezel = abs(push.width) >= abs(push.height)
             ? (push.width > 0 ? .right : .left)
@@ -121,14 +127,14 @@ final class PeekModel: ObservableObject {
             return
         }
         withAnimation(Tok.travel) {
-            visiting = target
+            visitingID = target.id
             push = .zero
         }
     }
 
     func goHome() {
         withAnimation(Tok.travel) {
-            visiting = nil
+            visitingID = nil
             push = .zero
         }
     }
@@ -284,7 +290,10 @@ struct EdgePeekView: View {
             .clipped()
         }
         .ignoresSafeArea()
-        .onAppear { m.start() }
+        .onAppear {
+            m.start()
+            m.fleet.startLiving()
+        }
     }
 
     /// Where the camera is: committed travel plus live finger drag.
@@ -308,18 +317,18 @@ struct EdgePeekView: View {
                           breathing: m.breathing)
             }
         }
-        .opacity(m.visiting == nil ? 1 : 0)
-        .animation(Tok.calm, value: m.visiting)
+        .opacity(m.visitingID == nil ? 1 : 0)
+        .animation(Tok.calm, value: m.visitingID)
     }
 
     private var footer: some View {
         VStack {
             Spacer()
-            Text(m.visiting == nil
+            Text(m.visitingID == nil
                  ? "two-finger push toward an edge — keep pushing to go there"
                  : "push back, or press esc, to come home")
                 .font(Tok.mono(11))
-                .foregroundStyle(Color.white.opacity(m.visiting == nil ? Tok.hintIdle : Tok.hintActive))
+                .foregroundStyle(Color.white.opacity(m.visitingID == nil ? Tok.hintIdle : Tok.hintActive))
                 .padding(.bottom, 18)
         }
         .allowsHitTesting(false)

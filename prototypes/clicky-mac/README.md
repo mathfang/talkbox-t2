@@ -24,6 +24,8 @@ terminal you launched it from. Look at your notch to find it.
 ## Controls
 
 **ZoomCanvas**
+- At 1:1 you see your own desktop and coloured light leaking in from the edges —
+  that is each agent, in the direction it is working. Brightest means it needs you
 - **Squeeze** two fingers together to step back and reveal the agents. Spreading
   them returns home — at rest you are already at maximum zoom, so spreading does
   nothing, which is why the hint says squeeze
@@ -67,6 +69,10 @@ replace the hand-rolled rim; this targets macOS 13, so it is assembled by hand.
 notch geometry (`safeAreaInsets` + `auxiliaryTopLeftArea`, with a centred
 fallback on displays without a notch), window levels and Space behaviour,
 `NSVisualEffectView` materials.
+
+**Real:** the agents are alive. Cursors move, progress advances, windows gain
+lines, and an idle agent occasionally picks work up — driven by a ticker in
+`Fleet.startLiving()`. Static tiles made the whole canvas read as a screenshot.
 
 **Faked:** the desktop behind it all. `DisplayMock` draws generic window
 chrome — these prototypes do not capture, composite, or control your real
