@@ -4,9 +4,11 @@ import ClickyKit
 
 // The ball at the notch.
 //
-// At rest it is a small object tucked against the notch, carrying only the
-// fleet's pulse. Swipe over it (or click it, or press ⌥Space) and it grows into
-// a minimap of where every agent is working relative to your display.
+// The orb is liquid glass with extra shadows — it has no colour of its own and
+// refracts whatever desktop is behind it. At rest it hangs out from under the
+// notch carrying only the fleet's pulse. Swipe over it (or click it, or press
+// ⌥Space) and it grows into a minimap of where every agent is working relative
+// to your display.
 //
 // Runs as an .accessory app: no Dock icon, no menu bar, never steals focus.
 // Quit it from the terminal it was launched from (ctrl-C).
@@ -39,10 +41,15 @@ final class NotchModel: ObservableObject {
     /// passes on its way to the menu bar, and the panel flickers all day.
     private var hotZone: CGRect { anchor.insetBy(dx: -24, dy: -6) }
 
+    /// The orb hangs below the notch and throws wide shadows, so every size
+    /// leaves room for both.
+    static let orbSize: CGFloat = 62
+
     func size(for mode: Mode) -> CGSize {
+        let orb = Self.orbSize
         switch mode {
-        case .idle: return CGSize(width: max(anchor.width, 160) + 80, height: anchor.height + 26)
-        case .peek: return CGSize(width: max(anchor.width, 160) + 190, height: anchor.height + 44)
+        case .idle: return CGSize(width: orb + 96, height: anchor.height + orb + 30)
+        case .peek: return CGSize(width: 240, height: anchor.height + orb + 58)
         case .open: return CGSize(width: 560, height: 392)
         }
     }
@@ -143,36 +150,6 @@ final class NotchModel: ObservableObject {
     }
 }
 
-// MARK: - The ball
-
-struct Ball: View {
-    @ObservedObject var m: NotchModel
-
-    private var urgent: Bool { m.fleet.needsYou > 0 }
-
-    var body: some View {
-        Circle()
-            .fill(
-                RadialGradient(
-                    colors: urgent
-                        ? [Tok.you, Tok.you.opacity(0.45)]
-                        : [Tok.agent.opacity(0.9), Tok.agent.opacity(0.28)],
-                    center: .init(x: 0.35, y: 0.3),
-                    startRadius: 1,
-                    endRadius: 22
-                )
-            )
-            .overlay(Circle().stroke(Color.white.opacity(0.22), lineWidth: 0.5))
-            // An agent waiting on you is the one thing allowed to be loud.
-            .shadow(color: (urgent ? Tok.you : Tok.agent)
-                        .opacity(m.breathing ? (urgent ? 1.0 : 0.6) : 0.25),
-                    radius: m.breathing ? (urgent ? 20 : 9) : 4)
-            .scaleEffect(urgent && m.breathing ? 1.18 : 1.0)
-            .animation(urgent ? Tok.alert : Tok.calm, value: m.breathing)
-            .frame(width: 20, height: 20)
-    }
-}
-
 // MARK: - The minimap
 
 struct Minimap: View {
@@ -252,32 +229,46 @@ struct NotchView: View {
         .onAppear { m.start() }
     }
 
-    /// Hugs the notch: a bar the same height as the notch with the ball beside
-    /// it, so on a notched Mac it reads as part of the hardware.
+    /// The orb sits centred on the notch with its top edge behind it, so on a
+    /// notched Mac it reads as something emerging from the hardware rather than
+    /// a widget parked next to it. The label drops below rather than beside,
+    /// which would push the orb off the notch centre.
     private var collapsed: some View {
-        HStack(spacing: 9) {
-            Ball(m: m)
+        VStack(spacing: 7) {
+            ClickyOrb(size: NotchModel.orbSize,
+                      urgent: m.fleet.needsYou > 0,
+                      breathing: m.breathing)
+                .contentShape(Circle())
+                .onTapGesture { m.toggleOpen() }
+
             if m.mode == .peek {
                 Text(m.fleet.needsYou > 0
                      ? "\(m.fleet.needsYou) needs you"
                      : "\(m.fleet.working) working")
                     .font(Tok.mono(10))
                     .foregroundStyle(Tok.label)
-                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.black.opacity(0.55)))
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: max(m.anchor.height, 30))
-        .background(Capsule().fill(Color.black.opacity(m.mode == .peek ? 0.55 : 0.0)))
-        .contentShape(Capsule())
-        .onTapGesture { m.toggleOpen() }
-        .padding(.top, m.hasRealNotch ? 0 : 2)
+        .frame(maxWidth: .infinity)
+        .padding(.top, orbTop)
+    }
+
+    /// Overlap the notch on hardware that has one; sit just under the menu bar
+    /// on hardware that does not.
+    private var orbTop: CGFloat {
+        m.hasRealNotch
+            ? max(0, m.anchor.height - NotchModel.orbSize * 0.44)
+            : m.anchor.height + 2
     }
 
     private var panel: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Ball(m: m)
+                ClickyOrb(size: 22, urgent: m.fleet.needsYou > 0, breathing: m.breathing)
                 Text("agents")
                     .font(Tok.ui(12, .semibold))
                     .foregroundStyle(Tok.label)

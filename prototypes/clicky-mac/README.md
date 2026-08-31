@@ -57,6 +57,12 @@ sketches under `design/clicky-window/`.
 
 ## What is real and what is faked
 
+**Real:** the orb. It is liquid glass built on a live `NSVisualEffectView`
+backdrop, so it genuinely refracts the desktop behind it rather than painting a
+gradient that imitates one — the rim, the two speculars and the three stacked
+shadows are what sell it as glass. On macOS 26 the native `.glassEffect()` would
+replace the hand-rolled rim; this targets macOS 13, so it is assembled by hand.
+
 **Real:** every gesture. Pinch phases, scroll momentum, rubber-band commit,
 notch geometry (`safeAreaInsets` + `auxiliaryTopLeftArea`, with a centred
 fallback on displays without a notch), window levels and Space behaviour,
@@ -83,6 +89,9 @@ require Accessibility, which is why ⌥Space is focus-only.
   mouse. The `−` / `=` keys are the fallback and are shown in the on-screen hint.
 - `swift run` builds an executable with no bundle, so there is no Dock icon or
   code signature. That is expected.
+- The orb is matched by eye from the `agent` Figma frame, not exported from it.
+  Shell egress to figma.com is blocked here, so the artwork could not be pulled
+  down — send a PNG export if you want it pixel-exact.
 - **Not compiled.** These were written in a Linux container with no Swift
   toolchain and no macOS SDK, so `swift build` has never run against them. They
   were reviewed for API availability, type errors and launch crashes, but the
